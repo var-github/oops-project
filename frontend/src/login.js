@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react'; // Added useRef
+import React, { useState, useEffect, useRef } from 'react';
 import PhoneInput from 'react-phone-number-input';
 // Note: In the final compiled environment, external CSS imports often fail.
 // I will include the necessary PhoneInput class overrides in the component's style block below.
@@ -125,7 +125,7 @@ function Login() {
       } else if (err.code === 'auth/missing-verification-code') {
         setError('Missing verification code. Please try again.');
       } else {
-        setError('Failed to send OTP. Check your number and network. (Code: ' + err.code + ')');
+        setError('Failed to send OTP. Check your number and network. (Code: ' + err.code + ');');
       }
 
       // Reset reCAPTCHA on error
@@ -338,6 +338,16 @@ function Login() {
             box-sizing: border-box;
             font-family: 'Inter', sans-serif;
         }
+
+        /* --- Global CSS to Disable Scrolling --- */
+        html, body {
+            overflow: hidden; /* Prevents scrolling */
+            height: 100%;    /* Ensures body takes full height */
+            margin: 0;       /* Removes default margin */
+            padding: 0;      /* Removes default padding */
+        }
+        /* ------------------------------------- */
+
 
         /* 1. Full Page Background for Glassmorphism Effect */
         .full-page-container {
@@ -562,6 +572,5 @@ function Login() {
     </div>
   );
 }
-
 
 export default Login;

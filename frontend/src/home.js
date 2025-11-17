@@ -577,7 +577,7 @@ function HomePage() {
     );
   };
 
-  // --- Product Detail Popup (UNCHANGED) ---
+  // --- Product Detail Popup (UPDATED CSS CLASS) ---
   const renderProductDetailPopup = () => {
     if (!selectedProduct) return null;
 
@@ -1012,22 +1012,28 @@ function HomePage() {
 
 
         .header { background-color: var(--color-header); color: white; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; position: fixed; top: 0; left: 0; right: 0; z-index: 1000; height: 50px; }
+        .nav-links-mobile { display: none; } /* Hidden by default */
+        .header-left { display: flex; align-items: center; }
+
         .icon-btn { background: none; border: none; color: white; cursor: pointer; font-size: 1.5rem; margin: 0 5px; padding: 5px; position: relative; transition: color var(--transition-speed); }
         .icon-btn:hover { color: var(--color-warning); }
 
         .cart-badge { font-size: 0.6em; position: absolute; top: 5px; right: 15px; background-color: var(--color-danger); color: white; border-radius: 50%; padding: 2px 5px; }
 
+        /* --- SIDEBAR (Desktop View) --- */
         .sidebar {
             position: fixed;
             top: 60px;
             left: 0;
             width: 60px;
             height: 100%;
-            background-color: var(--color-background); /* Updated */
+            background-color: var(--color-background);
             padding-top: 20px;
             border-right: 1px solid #ddd;
             z-index: 999;
         }
+
+        /* Nav Item Styles */
         .nav-item { margin-bottom: 20px; text-align: center; cursor: pointer; padding: 10px 0; font-size: 1.5rem; transition: background-color var(--transition-speed), color var(--transition-speed); }
 
         /* Logout Button Specific Style (Improved) */
@@ -1057,7 +1063,8 @@ function HomePage() {
         }
 
 
-        .main-content { margin-top: 50px; margin-left: 60px; padding: 20px; max-width: 1000px; margin-right: auto; margin-left: auto; background-color: var(--color-background); /* Updated */ min-height: calc(100vh - 50px); }
+        /* --- MAIN CONTENT (Desktop View) --- */
+        .main-content { margin-top: 50px; margin-left: 60px; padding: 20px; max-width: 1000px; margin-right: auto; margin-left: auto; background-color: var(--color-background); min-height: calc(100vh - 50px); }
 
         .product-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
 
@@ -1177,7 +1184,8 @@ function HomePage() {
 
         /* Floating Action Button */
         .fab {
-            position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+            position: fixed; bottom: 30px; right: 20px; /* Moved to bottom right corner */
+            left: unset; transform: none;
             width: 60px; height: 60px; border-radius: 50%;
             background-color: var(--color-success);
             color: white;
@@ -1292,35 +1300,175 @@ function HomePage() {
         .detail-actions { margin-top: 25px; }
         .btn-out-of-stock { width: 100%; padding: 12px; background-color: var(--color-danger); color: white; border: none; border-radius: var(--border-radius); font-weight: bold; opacity: 0.7; cursor: not-allowed; }
 
+        /* ======================================= */
+        /* --- MOBILE FRIENDLY MEDIA QUERIES --- */
+        /* ======================================= */
         @media (max-width: 768px) {
-            .product-detail-content { width: 95%; max-width: none; }
+            /* 1. Header Navigation */
+            .header {
+                height: 50px;
+                padding: 5px 15px;
+            }
+            .sidebar { display: none; } /* Hide Sidebar */
+
+            /* Display Mobile Nav Links */
+            .nav-links-mobile {
+                display: flex;
+                gap: 5px;
+            }
+
+            /* Style Mobile Nav Items (Icon buttons) */
+            .nav-item-mobile {
+                background: none;
+                border: none;
+                color: white;
+                cursor: pointer;
+                font-size: 1.2rem;
+                padding: 8px;
+                border-radius: 8px;
+                transition: background-color var(--transition-speed);
+                display: flex; align-items: center; justify-content: center;
+            }
+            .nav-item-mobile.active {
+                background-color: rgba(255, 255, 255, 0.2); /* Highlight active link */
+            }
+
+            /* Logout button in header */
+            .logout-icon-container {
+                margin: 0;
+                padding: 0;
+            }
+            .logout-icon-container .material-symbols-outlined {
+                color: white;
+                font-size: 1.5rem;
+            }
+            .logout-icon-container:hover {
+                background-color: transparent;
+                color: var(--color-warning);
+            }
+            .logout-icon-container:hover .material-symbols-outlined {
+                color: var(--color-warning);
+            }
+
+            /* 2. Main Content Adjustment */
+            .main-content {
+                margin-top: 50px; /* Use full width */
+                margin-left: 0;
+                padding: 15px;
+            }
+
+            /* 3. Product Grid */
+            .product-grid {
+                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); /* 2 columns is better than 1 */
+                gap: 15px;
+            }
+            .product-card img {
+                 height: 120px;
+            }
+
+            /* 4. Product Detail Popup */
+            .product-detail-content {
+                width: 100%;
+                height: 100%;
+                border-radius: 0;
+                padding: 20px;
+                overflow-y: auto;
+            }
+            .product-detail-overlay {
+                align-items: flex-start; /* Start from the top */
+                justify-content: center;
+            }
             .detail-body { flex-direction: column; }
-            .detail-photo-container { max-width: 100%; height: auto; }
+            .detail-photo-container { max-width: 100%; margin-bottom: 20px; }
+            .detail-header h3 { font-size: 1.5rem; }
+
+            /* 5. Cart Popup */
+            .cart-popup-content {
+                width: 100%;
+            }
+
+            /* 6. FAB Position */
+            .fab {
+                bottom: 15px;
+                right: 15px;
+                width: 50px;
+                height: 50px;
+                font-size: 1.5rem;
+            }
+
+            /* 7. Notification Popup */
+            .notification-popup {
+                width: calc(100% - 40px);
+                left: 10px;
+                right: 10px;
+                bottom: 10px;
+                max-width: none;
+                text-align: center;
+            }
+
         }
       `}</style>
 
 
       {/* 2. Fixed Header */}
       <div className="header">
-        <span style={{ fontWeight: 'bold', fontSize: '1.2rem' }}>Shopping Mart</span>
+        <div className="header-left">
+            <span style={{ fontWeight: 'bold', fontSize: '1.2rem' }}>Shopping Mart</span>
+
+            {/* Mobile Navigation Links */}
+            <div className="nav-links-mobile">
+                {/* Catalog Icon (Visible only to Wholesaler/Retailer) */}
+                {isBuyer && (
+                    <button
+                        className={`nav-item-mobile ${activeView === 'catalog' && !editingProduct && !showProductForm ? 'active' : ''}`}
+                        onClick={() => { setActiveView('catalog'); setShowProductForm(false); setEditingProduct(null); }}
+                        title="My Catalog"
+                    >
+                        📦
+                    </button>
+                )}
+
+                {/* Marketplace Icon (Primary Wholesaler Market) - Visible only to Wholesaler/Retailer */}
+                {currentUserType !== 'consumer' && (
+                    <button
+                        className={`nav-item-mobile ${activeView === 'marketplace' ? 'active' : ''}`}
+                        onClick={() => { setActiveView('marketplace'); setShowProductForm(false); setEditingProduct(null); }}
+                        title="Wholesaler Market"
+                    >
+                        🏢
+                    </button>
+                )}
+
+                {/* Retailer Marketplace Icon (Secondary Market) - Visible only to Retailers and Consumers */}
+                {(currentUserType === 'retailer' || currentUserType === 'consumer') && (
+                    <button
+                        className={`nav-item-mobile ${activeView === 'retailer_marketplace' ? 'active' : ''}`}
+                        onClick={() => { setActiveView('retailer_marketplace'); setShowProductForm(false); setEditingProduct(null); }}
+                        title="Retailer Resale Market"
+                    >
+                        🔄
+                    </button>
+                )}
+            </div>
+        </div>
+
         <div>
           {/* Cart Icon */}
           <button className="icon-btn" onClick={() => setShowCartPopup(true)} title="View Cart">
             🛒
             {totalItems > 0 && <span className="cart-badge">{totalItems}</span>}
           </button>
+          {/* Logout (Material Symbols Outlined icon) */}
+          <button className="icon-btn logout-icon-container" onClick={handleLogout} title="Logout">
+              <span className="material-symbols-outlined">
+                power_settings_new
+              </span>
+          </button>
         </div>
       </div>
 
-      {/* 3. Sidebar Navigation */}
+      {/* 3. Sidebar Navigation (Desktop only) */}
       <div className="sidebar">
-        {/* Logout (Material Symbols Outlined icon) */}
-        <div className="nav-item logout-icon-container" onClick={handleLogout} title="Logout">
-          <span className="material-symbols-outlined">
-            power_settings_new
-          </span>
-        </div>
-
         {/* Catalog Icon (Visible only to Wholesaler/Retailer) */}
         {isBuyer && (
           <div
@@ -1353,6 +1501,13 @@ function HomePage() {
               🔄
           </div>
         )}
+
+        {/* Logout (Moved to header on mobile, kept here for desktop consistency) */}
+        {/* <div className="nav-item logout-icon-container" onClick={handleLogout} title="Logout">
+          <span className="material-symbols-outlined">
+            power_settings_new
+          </span>
+        </div> */}
       </div>
 
       {/* 4. Main Content Area */}
@@ -1382,6 +1537,5 @@ function HomePage() {
     </div>
   );
 }
-
 
 export default HomePage;

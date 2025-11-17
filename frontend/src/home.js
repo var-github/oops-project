@@ -1372,7 +1372,7 @@ function HomePage() {
             /* 4. Product Detail Popup */
             .product-detail-content {
                 width: 100%;
-                height: 120%;
+                height: 140%;
                 border-radius: 0;
                 padding: 20px;
                 overflow-y: auto;
@@ -1542,6 +1542,7 @@ function HomePage() {
 }
 
 export default HomePage;
+
 
 
 

@@ -1309,7 +1309,7 @@ function HomePage() {
             /* 1. Header Navigation */
             .header {
                 height: 50px;
-                padding: 5px 15px 0px 20px;
+                padding: 5px 15px;
             }
             .sidebar { display: none; } /* Hide Sidebar */
 
@@ -1317,6 +1317,7 @@ function HomePage() {
             .nav-links-mobile {
                 display: flex;
                 gap: 5px;
+                padding-left: 20px;
             }
 
             /* Style Mobile Nav Items (Icon buttons) */
@@ -1375,7 +1376,6 @@ function HomePage() {
                 border-radius: 0;
                 padding: 20px;
                 overflow-y: auto;
-                padding-bottom: 100px;
             }
             .product-detail-overlay {
                 align-items: flex-start; /* Start from the top */
@@ -1388,6 +1388,7 @@ function HomePage() {
             /* 5. Cart Popup */
             .cart-popup-content {
                 width: 100%;
+                padding-bottom: 100px;
             }
 
             /* 6. FAB Position */
@@ -1542,4 +1543,5 @@ function HomePage() {
 }
 
 export default HomePage;
+
 

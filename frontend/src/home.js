@@ -1039,7 +1039,8 @@ function HomePage() {
 
         /* Logout Button Specific Style (Improved) */
         .logout-icon-container {
-            color: white;
+            color: var(--color-danger);
+            top: 10px;
             padding: 10px 0;
         }
         .logout-icon-container .material-symbols-outlined {
@@ -1048,10 +1049,10 @@ function HomePage() {
             transition: color var(--transition-speed);
         }
         .logout-icon-container:hover {
-            color: var(--color-danger);
+            color: white;
         }
         .logout-icon-container:hover .material-symbols-outlined {
-            color: var(--color-danger);
+            color: white;
         }
 
         /* Update standard nav item hover */
@@ -1550,4 +1551,5 @@ function HomePage() {
 }
 
 export default HomePage;
+
 

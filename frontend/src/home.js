@@ -1122,7 +1122,7 @@ function HomePage() {
         .quantity-control-container { display: flex; justify-content: space-between; align-items: center; width: 100%; border: 1px solid var(--color-primary); border-radius: var(--border-radius); overflow: hidden; height: 36px; }
         .quantity-btn {
             width: 15%;
-            flex-basis: 15%;
+            flex-basis: 20%;
             background-color: var(--color-primary);
             color: white; border: none; font-size: 1.1em;
             cursor: pointer; transition: background-color 0.2s;
@@ -1135,7 +1135,7 @@ function HomePage() {
 
         /* Quantity Input Field Style */
         .quantity-input {
-            width: 70%;
+            width: 60%;
             flex-grow: 1;
             text-align: center;
             font-weight: bold;
@@ -1309,7 +1309,7 @@ function HomePage() {
             /* 1. Header Navigation */
             .header {
                 height: 50px;
-                padding: 5px 15px;
+                padding: 5px 15px 0px 20px;
             }
             .sidebar { display: none; } /* Hide Sidebar */
 
@@ -1317,7 +1317,6 @@ function HomePage() {
             .nav-links-mobile {
                 display: flex;
                 gap: 5px;
-                left: 10px;
             }
 
             /* Style Mobile Nav Items (Icon buttons) */
@@ -1543,3 +1542,4 @@ function HomePage() {
 }
 
 export default HomePage;
+

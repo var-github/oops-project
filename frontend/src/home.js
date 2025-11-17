@@ -26,6 +26,7 @@ function HomePage() {
 
   // --- State for User Data & Flow ---
   const [currentUserType, setCurrentUserType] = useState(null);
+  // FIX: Corrected syntax error by adding useState()
   const [loadingUserType, setLoadingUserType] = useState(true);
   const [activeView, setActiveView] = useState('retailer_marketplace');
   const [showProductForm, setShowProductForm] = useState(false);
@@ -1372,7 +1373,9 @@ function HomePage() {
             /* 4. Product Detail Popup */
             .product-detail-content {
                 width: 100%;
-                height: 120%;
+                /* FIX: Use max-height based on viewport for scrollability (100vh - 50px header - 20px margin) */
+                max-height: calc(100vh - 40px);
+                height: auto;
                 border-radius: 0;
                 padding: 20px;
                 overflow-y: auto;
@@ -1380,11 +1383,18 @@ function HomePage() {
             .product-detail-overlay {
                 align-items: flex-start; /* Start from the top */
                 justify-content: center;
-                height: 120%;
+                /* REMOVED: padding-top: 50px; */
             }
             .detail-body { flex-direction: column; }
             .detail-photo-container { max-width: 100%; margin-bottom: 20px; }
             .detail-header h3 { font-size: 1.5rem; }
+
+            /* FIX 1: Ensure detail-info takes full width when body is column */
+            .detail-info { flex-basis: 100%; }
+
+            /* FIX 2: Ensure quantity control doesn't get boxed in */
+            .quantity-control-container { width: 100%; max-width: none; }
+
 
             /* 5. Cart Popup */
             .cart-popup-content {
@@ -1543,8 +1553,3 @@ function HomePage() {
 }
 
 export default HomePage;
-
-
-
-
-

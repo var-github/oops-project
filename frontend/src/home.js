@@ -1040,7 +1040,7 @@ function HomePage() {
         /* Logout Button Specific Style (Improved) */
         .logout-icon-container {
             color: var(--color-danger);
-            top: 10px;
+            top: 5px;
             padding: 10px 0;
         }
         .logout-icon-container .material-symbols-outlined {
@@ -1551,5 +1551,6 @@ function HomePage() {
 }
 
 export default HomePage;
+
 
 

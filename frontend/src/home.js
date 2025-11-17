@@ -1121,7 +1121,8 @@ function HomePage() {
         /* Quantity Control Styling */
         .quantity-control-container { display: flex; justify-content: space-between; align-items: center; width: 100%; border: 1px solid var(--color-primary); border-radius: var(--border-radius); overflow: hidden; height: 36px; }
         .quantity-btn {
-            flex-basis: 35%; /* UPDATED: Increased width for + and - buttons */
+            width: 10%;
+            flex-basis: 15%;
             background-color: var(--color-primary);
             color: white; border: none; font-size: 1.1em;
             cursor: pointer; transition: background-color 0.2s;
@@ -1134,6 +1135,7 @@ function HomePage() {
 
         /* Quantity Input Field Style */
         .quantity-input {
+            width: 80%;
             flex-grow: 1;
             text-align: center;
             font-weight: bold;
@@ -1369,10 +1371,11 @@ function HomePage() {
             /* 4. Product Detail Popup */
             .product-detail-content {
                 width: 100%;
-                height: 100%;
+                height: 120%;
                 border-radius: 0;
                 padding: 20px;
                 overflow-y: auto;
+                padding-bottom: 100px;
             }
             .product-detail-overlay {
                 align-items: flex-start; /* Start from the top */

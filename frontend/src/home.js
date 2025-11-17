@@ -1121,7 +1121,7 @@ function HomePage() {
         /* Quantity Control Styling */
         .quantity-control-container { display: flex; justify-content: space-between; align-items: center; width: 100%; border: 1px solid var(--color-primary); border-radius: var(--border-radius); overflow: hidden; height: 36px; }
         .quantity-btn {
-            width: 10%;
+            width: 15%;
             flex-basis: 15%;
             background-color: var(--color-primary);
             color: white; border: none; font-size: 1.1em;
@@ -1135,7 +1135,7 @@ function HomePage() {
 
         /* Quantity Input Field Style */
         .quantity-input {
-            width: 80%;
+            width: 70%;
             flex-grow: 1;
             text-align: center;
             font-weight: bold;
@@ -1317,6 +1317,7 @@ function HomePage() {
             .nav-links-mobile {
                 display: flex;
                 gap: 5px;
+                left: 10px;
             }
 
             /* Style Mobile Nav Items (Icon buttons) */

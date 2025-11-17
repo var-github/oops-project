@@ -1317,7 +1317,7 @@ function HomePage() {
             .nav-links-mobile {
                 display: flex;
                 gap: 5px;
-                padding-left: 20px;
+                padding-left: 5px;
             }
 
             /* Style Mobile Nav Items (Icon buttons) */
@@ -1388,7 +1388,6 @@ function HomePage() {
             /* 5. Cart Popup */
             .cart-popup-content {
                 width: 100%;
-                padding-bottom: 100px;
             }
 
             /* 6. FAB Position */
@@ -1543,5 +1542,6 @@ function HomePage() {
 }
 
 export default HomePage;
+
 
 

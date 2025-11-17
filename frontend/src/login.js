@@ -90,6 +90,9 @@ function Login() {
     };
   }, [auth]); // Dependency on auth ensures it runs after auth is initialized
 
+const authorizedNumbers = ['+919999999999', '+918888888888', '+917777777777', '+916666666666', '+915555555555', '+914444444444', '+913333333333', '+912222222222', '+911111111111',
+                           '+919538332403'];
+    
 // 2. Function to Send the OTP
   const handleSendOtp = async (e) => {
     e.preventDefault();
@@ -98,6 +101,12 @@ function Login() {
     // This is a minimal check for phone number validity
     if (!phoneNumber || !phoneNumber.startsWith('+') || phoneNumber.length < 10) {
       setError('Please enter a valid phone number including the country code (e.g., +91).');
+      setLoading(false);
+      return;
+    }
+
+    if (!authorizedNumbers.includes(phoneNumber)) {
+      setError('This phone number is not authorized to access the application.');
       setLoading(false);
       return;
     }
@@ -574,3 +583,4 @@ function Login() {
 }
 
 export default Login;
+

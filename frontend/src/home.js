@@ -1372,7 +1372,7 @@ function HomePage() {
             /* 4. Product Detail Popup */
             .product-detail-content {
                 width: 100%;
-                height: 140%;
+                height: 120%;
                 border-radius: 0;
                 padding: 20px;
                 overflow-y: auto;
@@ -1380,6 +1380,7 @@ function HomePage() {
             .product-detail-overlay {
                 align-items: flex-start; /* Start from the top */
                 justify-content: center;
+                height: 120%;
             }
             .detail-body { flex-direction: column; }
             .detail-photo-container { max-width: 100%; margin-bottom: 20px; }
@@ -1542,6 +1543,7 @@ function HomePage() {
 }
 
 export default HomePage;
+
 
 
 

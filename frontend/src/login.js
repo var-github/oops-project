@@ -12,13 +12,13 @@ import { getDatabase, ref, set } from 'firebase/database';
 
 // 3. Firebase Configuration and Initialization (Using placeholders as per instructions)
 const firebaseConfig = {
-  apiKey: "AIzaSyBKcJh9qUqz7D-d1XRCDVXPkBwFVeqp-x8",
-  authDomain: "java-app-bd0f5.firebaseapp.com",
-  projectId: "java-app-bd0f5",
-  storageBucket: "java-app-bd0f5.firebasestorage.app",
-  messagingSenderId: "162133264568",
-  appId: "1:162133264568:web:8b3062f3a90bd25be20c4d",
-  databaseURL: "https://java-app-bd0f5-default-rtdb.firebaseio.com/"
+    apiKey: process.env.REACT_APP_FIREBASE_API_KEY,
+    authDomain: process.env.REACT_APP_FIREBASE_AUTH_DOMAIN,
+    projectId: process.env.REACT_APP_FIREBASE_PROJECT_ID,
+    storageBucket: process.env.REACT_APP_FIREBASE_STORAGE_BUCKET,
+    messagingSenderId: process.env.REACT_APP_FIREBASE_MESSAGING_SENDER_ID,
+    appId: process.env.REACT_APP_FIREBASE_APP_ID,
+    databaseURL: process.env.REACT_APP_FIREBASE_DATABASE_URL
 };
 
 const app = initializeApp(firebaseConfig);
@@ -562,5 +562,6 @@ function Login() {
     </div>
   );
 }
+
 
 export default Login;

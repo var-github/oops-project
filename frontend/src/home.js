@@ -1039,10 +1039,8 @@ function HomePage() {
 
         /* Logout Button Specific Style (Improved) */
         .logout-icon-container {
-            color: var(--color-danger);
-            margin-top: -10px;
+            color: white;
             padding: 10px 0;
-            transition: background-color var(--transition-speed);
         }
         .logout-icon-container .material-symbols-outlined {
             font-size: 1.8rem;
@@ -1050,11 +1048,10 @@ function HomePage() {
             transition: color var(--transition-speed);
         }
         .logout-icon-container:hover {
-            background-color: var(--color-danger);
-            color: white;
+            color: var(--color-danger);
         }
         .logout-icon-container:hover .material-symbols-outlined {
-            color: white;
+            color: var(--color-danger);
         }
 
         /* Update standard nav item hover */
@@ -1553,3 +1550,4 @@ function HomePage() {
 }
 
 export default HomePage;
+

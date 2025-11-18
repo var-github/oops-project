@@ -371,8 +371,13 @@ function HomePage() {
   };
 
 
-  // --- ADD/EDIT/DELETE Logic (UNCHANGED) ---
+  // --- ADD/EDIT/DELETE Logic ---
+
+  // FIX START: Modified handleStartEdit to prevent resetting state
   const handleStartEdit = (product) => {
+    // We manually set the view to catalog instead of using handleNavClick,
+    // because handleNavClick resets editingProduct to null.
+    setActiveView('catalog');
     setShowProductForm(false);
     setEditingProduct(product);
 
@@ -385,8 +390,8 @@ function HomePage() {
 
     setProductPhoto(null);
     setAddProductError(''); setAddProductSuccess('');
-    handleNavClick('catalog'); // Use the unified handler
   };
+  // FIX END
 
   const handleUpdateProduct = async (e) => {
     e.preventDefault();
@@ -2431,9 +2436,9 @@ function HomePage() {
         {/* Marketplace Icon (Primary Wholesaler Market) - Visible only to Wholesaler/Retailer */}
         {currentUserType !== 'consumer' && (
           <div
-            className={`nav-item ${activeView === 'marketplace' && !showCheckout ? 'active' : ''}`}
-            onClick={() => handleNavClick('marketplace')}
-            title="Wholesaler Market"
+              className={`nav-item ${activeView === 'marketplace' && !showCheckout ? 'active' : ''}`}
+              onClick={() => handleNavClick('marketplace')}
+              title="Wholesaler Market"
           >
             🏢
           </div>

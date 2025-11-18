@@ -1,16 +1,29 @@
 import React, { useState, useEffect, useRef } from 'react';
 import PhoneInput from 'react-phone-number-input';
-// Note: In the final compiled environment, external CSS imports often fail.
-// I will include the necessary PhoneInput class overrides in the component's style block below.
+// Note: We are strictly overriding styles below.
 // import 'react-phone-number-input/style.css';
 import { useNavigate } from 'react-router-dom';
 
 // 2. Firebase Imports
 import { initializeApp } from "firebase/app";
-import { getAuth, RecaptchaVerifier, signInWithPhoneNumber, updateProfile } from 'firebase/auth';
-import { getDatabase, ref, set } from 'firebase/database';
+import {
+  getAuth,
+  RecaptchaVerifier,
+  signInWithPhoneNumber,
+  updateProfile,
+  GoogleAuthProvider,
+  signInWithPopup
+} from 'firebase/auth';
+import {
+  getDatabase,
+  ref,
+  set,
+  get,
+  child,
+  runTransaction // Required for the atomic counter logic
+} from 'firebase/database';
 
-// 3. Firebase Configuration and Initialization (Using placeholders as per instructions)
+// 3. Firebase Configuration
 const firebaseConfig = {
     apiKey: process.env.REACT_APP_FIREBASE_API_KEY,
     authDomain: process.env.REACT_APP_FIREBASE_AUTH_DOMAIN,
@@ -23,9 +36,18 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
-const db = getDatabase(app); // Initialize Realtime Database
+const db = getDatabase(app);
 
-// 4. Main React Component
+// Global settings
+const OTP_QUOTA_LIMIT = 5;
+
+// List of test numbers whose OTP requests will not be counted
+const testNumbers = [
+    '+919999999999', '+918888888888', '+917777777777',
+    '+916666666666', '+915555555555', '+914444444444',
+    '+913333333333', '+912222222222', '+911111111111'
+];
+
 function Login() {
   const navigate = useNavigate();
 
@@ -40,79 +62,82 @@ function Login() {
 
   // Profile Setup States
   const [userName, setUserName] = useState('');
-  const [userType, setUserType] = useState('consumer'); // Default type
+  const [userType, setUserType] = useState('consumer');
 
   // Feedback States
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
-  // NEW: Use useRef to safely store the external RecaptchaVerifier instance
   const recaptchaRef = useRef(null);
 
-
-  // 1. Setup reCAPTCHA Verifier on component mount
+  // 1. Setup reCAPTCHA Verifier
   useEffect(() => {
-    // Check if the auth instance is available AND the RecaptchaVerifier instance is not already set in the ref
     if (!auth || recaptchaRef.current) return;
 
-    // Initialize RecaptchaVerifier
     try {
       const verifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
         'size': 'invisible',
         'callback': (response) => {
-          // reCAPTCHA solved automatically
           console.log("reCAPTCHA solved.");
         },
         'expired-callback': () => {
           setError('reCAPTCHA expired. Please refresh and try again.');
         }
       });
-
-      // Store the instance in the ref
       recaptchaRef.current = verifier;
-
-      // Render the reCAPTCHA widget
       if (recaptchaRef.current) {
         window.captchaWidgetId = recaptchaRef.current.render();
       }
-
     } catch (e) {
       console.error("Error setting up reCAPTCHA:", e);
       setError("Failed to initialize security check. Please check Firebase configuration.");
     }
 
+    return () => {};
+  }, [auth]);
 
-    // The cleanup function now only handles potential manual resets if needed,
-    // but avoids clearing the global instance which causes verification errors.
-    return () => {
-      // Explicitly leave recaptchaRef.current intact for persistence.
-    };
-  }, [auth]); // Dependency on auth ensures it runs after auth is initialized
+  // --- Google Login Handler ---
+  const handleGoogleLogin = async () => {
+    setError(''); setSuccess(''); setLoading(true);
+    const provider = new GoogleAuthProvider();
 
-const authorizedNumbers = ['+919999999999', '+918888888888', '+917777777777', '+916666666666', '+915555555555', '+914444444444', '+913333333333', '+912222222222', '+911111111111',
-                           '+919538332403'];
-    
-// 2. Function to Send the OTP
+    try {
+      const result = await signInWithPopup(auth, provider);
+      const user = result.user;
+
+      const dbRef = ref(db);
+      const userSnapshot = await get(child(dbRef, `users/${user.uid}`));
+
+      if (userSnapshot.exists()) {
+        setSuccess(`Welcome back, ${user.displayName}!`);
+        navigate('/home');
+      } else {
+        setUserName(user.displayName || '');
+        setShowProfileSetup(true);
+        setSuccess('Google verification successful! Please complete your profile.');
+      }
+
+    } catch (err) {
+      console.error('Google Sign In Error:', err);
+      setError('Failed to sign in with Google. ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 2. Function to Send the OTP
   const handleSendOtp = async (e) => {
     e.preventDefault();
     setError(''); setSuccess(''); setLoading(true);
 
-    // This is a minimal check for phone number validity
     if (!phoneNumber || !phoneNumber.startsWith('+') || phoneNumber.length < 10) {
       setError('Please enter a valid phone number including the country code (e.g., +91).');
       setLoading(false);
       return;
     }
 
-    if (!authorizedNumbers.includes(phoneNumber)) {
-      setError('This phone number is not authorized to access the application.');
-      setLoading(false);
-      return;
-    }
-
     try {
-      // Use the Recaptcha instance stored in the ref
       const appVerifier = recaptchaRef.current;
       if (!appVerifier) {
         setError('Security check (reCAPTCHA) not initialized. Please refresh.');
@@ -120,6 +145,45 @@ const authorizedNumbers = ['+919999999999', '+918888888888', '+917777777777', '+
         return;
       }
 
+      // --- Quota Check for NON-TEST Numbers ---
+      const isTestNumber = testNumbers.includes(phoneNumber);
+
+      if (!isTestNumber) {
+        const statsRef = ref(db, 'system_stats/otp_requests');
+        const todayStr = new Date().toISOString().split('T')[0]; // Format: YYYY-MM-DD
+        let quotaExceeded = false;
+
+        await runTransaction(statsRef, (currentData) => {
+          // 1. If no data or new day, initialize count to 1 (allowing the request)
+          if (!currentData || currentData.date !== todayStr) {
+              return { date: todayStr, count: 1 };
+          }
+
+          // 2. If same day, check for quota
+          if (currentData.count >= OTP_QUOTA_LIMIT) {
+              quotaExceeded = true;
+              // Returning the data unchanged aborts the write operation
+              return currentData;
+          }
+
+          // 3. Increment count
+          return { ...currentData, count: currentData.count + 1 };
+        });
+
+        if (quotaExceeded) {
+            setError('OTP quota exhausted for the day. Please try again tomorrow.');
+            setLoading(false);
+            // Crucial: Reset reCAPTCHA after failure
+            if (window.grecaptcha && window.captchaWidgetId !== undefined) {
+              window.grecaptcha.reset(window.captchaWidgetId);
+            }
+            return;
+        }
+      }
+      // Test numbers skip the quota check and increment logic completely.
+      // -----------------------------------------------------------------
+
+      // If checks passed, proceed to send SMS
       const result = await signInWithPhoneNumber(auth, phoneNumber, appVerifier);
 
       setConfirmationResult(result);
@@ -128,7 +192,6 @@ const authorizedNumbers = ['+919999999999', '+918888888888', '+917777777777', '+
 
     } catch (err) {
       console.error('Error sending OTP:', err);
-      // Firebase specific error handling
       if (err.code === 'auth/invalid-phone-number') {
         setError('The phone number format is invalid.');
       } else if (err.code === 'auth/missing-verification-code') {
@@ -137,17 +200,15 @@ const authorizedNumbers = ['+919999999999', '+918888888888', '+917777777777', '+
         setError('Failed to send OTP. Check your number and network. (Code: ' + err.code + ');');
       }
 
-      // Reset reCAPTCHA on error
       if (window.grecaptcha && window.captchaWidgetId !== undefined) {
         window.grecaptcha.reset(window.captchaWidgetId);
       }
-
     } finally {
       setLoading(false);
     }
   };
 
-  // 3. Function to Verify the OTP and determine flow (existing or new user)
+  // 3. Function to Verify the OTP
   const handleVerifyOtp = async (e) => {
     e.preventDefault();
     setError(''); setSuccess(''); setLoading(true);
@@ -167,21 +228,17 @@ const authorizedNumbers = ['+919999999999', '+918888888888', '+917777777777', '+
       const userCredential = await confirmationResult.confirm(otp);
       const user = userCredential.user;
 
-      // Check if profile information is missing (first-time login)
-      // Note: displayName is a good proxy for first-time login via phone auth
       if (!user.displayName) {
         setShowOtpInput(false);
-        setShowProfileSetup(true); // Move to profile setup screen
+        setShowProfileSetup(true);
         setSuccess('Verification successful! Please complete your profile.');
       } else {
-        // Existing user, proceed to home
         setSuccess(`Login successful! Welcome back, ${user.displayName}.`);
         navigate('/home');
       }
 
     } catch (err) {
       console.error('Error verifying OTP:', err);
-      // Specific error for wrong OTP
       if (err.code === 'auth/invalid-verification-code') {
         setError('Invalid OTP. Please check the code and try again.');
       } else {
@@ -192,7 +249,7 @@ const authorizedNumbers = ['+919999999999', '+918888888888', '+917777777777', '+
     }
   };
 
-  // 4. Function to Complete Profile Setup and save to RTDB
+  // 4. Function to Complete Profile Setup
   const handleProfileSetup = async (e) => {
     e.preventDefault();
     setError(''); setSuccess(''); setLoading(true);
@@ -212,20 +269,18 @@ const authorizedNumbers = ['+919999999999', '+918888888888', '+917777777777', '+
     const userId = user.uid;
 
     try {
-      // 1. STORE DATA IN REALTIME DATABASE (RTDB)
       await set(ref(db, 'users/' + userId), {
         username: userName.trim(),
         userType: userType,
-        phoneNumber: user.phoneNumber,
+        phoneNumber: user.phoneNumber || null,
+        email: user.email || null,
         createdAt: new Date().toISOString()
       });
 
-      // 2. Update the Firebase User Profile (MANDATORY for Home page logic)
       await updateProfile(user, {
         displayName: userName.trim(),
       });
 
-      // 3. Navigate to home
       setSuccess(`Welcome, ${userName.trim()}! Setup complete.`);
       navigate('/home');
 
@@ -240,10 +295,12 @@ const authorizedNumbers = ['+919999999999', '+918888888888', '+917777777777', '+
   // --- Conditional Rendering Logic ---
   const renderContent = () => {
     if (showProfileSetup) {
-      // STEP 3: Profile Setup Form
       return (
         <form onSubmit={handleProfileSetup}>
           <h3 className="sub-title">Complete Your Profile</h3>
+          <p style={{textAlign: 'center', fontSize: '0.9rem', color: '#555', marginBottom: '15px'}}>
+            {auth.currentUser?.email ? `Linked to: ${auth.currentUser.email}` : 'Please enter your details'}
+          </p>
 
           <label className="form-label">Your Name:</label>
           <input
@@ -279,7 +336,6 @@ const authorizedNumbers = ['+919999999999', '+918888888888', '+917777777777', '+
     }
 
     if (showOtpInput) {
-      // STEP 2: OTP Input Form
       return (
         <form onSubmit={handleVerifyOtp}>
           <h3 className="sub-title">Verify OTP</h3>
@@ -311,128 +367,91 @@ const authorizedNumbers = ['+919999999999', '+918888888888', '+917777777777', '+
       );
     }
 
-    // STEP 1: Phone Number Input Form
     return (
-      <form onSubmit={handleSendOtp}>
-        <h3 className="sub-title">Enter Phone Number</h3>
-        <label className="form-label">Phone Number:</label>
-        <div className="phone-input-container">
-            <PhoneInput
-              international
-              defaultCountry="IN"
-              value={phoneNumber}
-              onChange={setPhoneNumber}
-              placeholder="Enter phone number"
-            />
+      <div>
+        <h3 className="sub-title">Login or Register</h3>
+
+        {/* Phone Form */}
+        <form onSubmit={handleSendOtp}>
+          <label className="form-label">Phone Number:</label>
+          <div className="phone-input-container">
+              <PhoneInput
+                international
+                defaultCountry="IN"
+                value={phoneNumber}
+                onChange={setPhoneNumber}
+                placeholder="Enter phone number"
+              />
+          </div>
+          <button
+            type="submit"
+            disabled={loading || !phoneNumber}
+            className="btn-primary btn-send-otp"
+          >
+            {loading ? 'Sending...' : 'Send OTP'}
+          </button>
+        </form>
+
+        {/* Divider */}
+        <div className="divider-container">
+            <div className="divider-line"></div>
+            <span className="divider-text">OR</span>
+            <div className="divider-line"></div>
         </div>
+
+        {/* Google Button */}
         <button
-          type="submit"
-          disabled={loading || !phoneNumber}
-          className="btn-primary btn-send-otp" // Added specific class for styling
-          style={{marginTop: '30px'}}
+            type="button"
+            onClick={handleGoogleLogin}
+            disabled={loading}
+            className="btn-primary btn-google"
         >
-          {loading ? 'Sending...' : 'Send OTP'}
+            <svg width="18" height="18" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg" style={{marginRight: '10px'}}>
+                <path d="M17.64 9.20455C17.64 8.56636 17.5827 7.95273 17.4764 7.36364H9V10.845H13.8436C13.635 11.97 13.0009 12.9232 12.0477 13.5614V15.8195H14.9564C16.6582 14.2527 17.64 11.9455 17.64 9.20455Z" fill="#4285F4"/>
+                <path d="M9 18C11.43 18 13.4673 17.1941 14.9564 15.8195L12.0477 13.5614C11.2418 14.1014 10.2109 14.4205 9 14.4205C6.65591 14.4205 4.67182 12.8373 3.96409 10.71H0.957275V13.0418C2.43818 15.9832 5.48182 18 9 18Z" fill="#34A853"/>
+                <path d="M3.96409 10.71C3.78409 10.17 3.68182 9.59318 3.68182 9C3.68182 8.40682 3.78409 7.83 3.96409 7.29V4.95818H0.957275C0.347727 6.17318 0 7.54773 0 9C0 10.4523 0.347727 11.8268 0.957275 13.0418L3.96409 10.71Z" fill="#FBBC05"/>
+                <path d="M9 3.57955C10.3214 3.57955 11.5077 4.03364 12.4405 4.92545L15.0218 2.34409C13.4632 0.891818 11.4259 0 9 0C5.48182 0 2.43818 2.01682 0.957275 4.95818L3.96409 7.29C4.67182 5.16273 6.65591 3.57955 9 3.57955Z" fill="#EA4335"/>
+            </svg>
+            {loading ? 'Signing in...' : 'Sign in with Google'}
         </button>
-      </form>
+
+      </div>
     );
   };
 
   return (
     <div className="full-page-container">
-      {/* 1. Global and Glassmorphism Styles */}
       <style>
         {`
-        /* Global Reset for better aesthetics */
-        * {
-            box-sizing: border-box;
-            font-family: 'Inter', sans-serif;
-        }
-
-        /* --- Global CSS to Disable Scrolling --- */
-        html, body {
-            overflow: hidden; /* Prevents scrolling */
-            height: 100%;    /* Ensures body takes full height */
-            margin: 0;       /* Removes default margin */
-            padding: 0;      /* Removes default padding */
-        }
-        /* ------------------------------------- */
-
-
-        /* 1. Full Page Background for Glassmorphism Effect */
+        * { box-sizing: border-box; font-family: 'Inter', sans-serif; }
+        html, body { overflow: hidden; height: 100%; margin: 0; padding: 0; }
         .full-page-container {
-            /* Fallback colors */
-            background: #a7e0ff;
-            /* Gradient background with blue/purple/pink aesthetic */
             background: linear-gradient(135deg, #a7e0ff 0%, #a0c4ff 50%, #f6e6ff 100%);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            margin: 0;
-            padding: 20px;
+            display: flex; justify-content: center; align-items: center;
+            min-height: 100vh; margin: 0; padding: 20px;
         }
-
-        /* 2. Glassmorphism Card Container */
         .glass-card {
-            background: rgba(255, 255, 255, 0.2); /* Semi-transparent white */
-            backdrop-filter: blur(10px); /* The magic */
-            -webkit-backdrop-filter: blur(10px); /* Safari support */
-            border: 1px solid rgba(255, 255, 255, 0.3); /* Light border */
-            border-radius: 16px;
-            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37); /* Subtle shadow */
-            padding: 40px;
-            width: 90%;
-            max-width: 450px;
-            transition: all 0.3s ease;
+            background: rgba(255, 255, 255, 0.2);
+            backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 16px; box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+            padding: 40px; width: 90%; max-width: 450px; transition: all 0.3s ease;
         }
+        .main-title { color: #1f3787; text-align: center; margin-bottom: 20px; font-weight: 800; font-size: 1.8rem; }
+        .sub-title { color: #007bff; text-align: center; margin-top: 0; margin-bottom: 25px; font-weight: 600; font-size: 1.3rem; }
 
-        .main-title {
-            color: #1f3787; /* Dark blue/purple for contrast */
-            text-align: center;
-            margin-bottom: 20px;
-            font-weight: 800;
-            font-size: 1.8rem;
-        }
-
-        .sub-title {
-            color: #007bff;
-            text-align: center;
-            margin-top: 0;
-            margin-bottom: 25px;
-            font-weight: 600;
-            font-size: 1.3rem;
-        }
-
-        /* 3. Form Elements */
-        .form-label {
-            display: block;
-            margin-bottom: 8px;
-            color: #1f3787;
-            font-weight: 600;
-            font-size: 0.95rem;
-        }
-
+        .form-label { display: block; margin-bottom: 8px; color: #1f3787; font-weight: 600; font-size: 0.95rem; }
         .input-field, .select-field {
-            width: 100%;
-            padding: 12px;
-            margin-bottom: 20px;
-            border: 1px solid rgba(255, 255, 255, 0.5);
-            border-radius: 8px;
-            background: rgba(255, 255, 255, 0.7); /* Slightly opaque input field */
-            color: #333;
+            width: 100%; padding: 12px; margin-bottom: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.5); border-radius: 8px;
+            background: rgba(255, 255, 255, 0.7); color: #333;
             transition: border 0.3s, background 0.3s, box-shadow 0.3s;
         }
-
         .input-field:focus, .select-field:focus {
-            border: 1px solid #007bff;
-            background: white;
-            box-shadow: 0 0 5px rgba(0, 123, 255, 0.5);
-            outline: none;
+            border: 1px solid #007bff; background: white; box-shadow: 0 0 5px rgba(0, 123, 255, 0.5); outline: none;
         }
 
-        /* 4. Phone Input Specific Styling (Overrides for react-phone-number-input) */
-
-        /* Container styling for border/background/height */
+        /* --- FIXED PHONE INPUT STYLES v3 --- */
         .phone-input-container {
             border: 1px solid rgba(255, 255, 255, 0.5);
             border-radius: 8px;
@@ -441,141 +460,93 @@ const authorizedNumbers = ['+919999999999', '+918888888888', '+917777777777', '+
             display: flex;
             align-items: center;
             margin-bottom: 20px;
-            padding: 0 12px; /* Padding inside the container */
-            height: 48px; /* Fixed height for visual consistency */
-            overflow: hidden;
+            padding: 0 12px;
+            height: 50px;
         }
 
-        /* The core PhoneInput component wrapper */
         .phone-input-container .PhoneInput {
-            width: 100%;
-            height: 100%;
             display: flex;
             align-items: center;
+            width: 100%;
+            height: 100%;
         }
 
-        /* The country selector part (flag, dropdown, and code) */
+        /* The container for the flag and the hidden select */
         .phone-input-container .PhoneInputCountry {
-            margin-right: 10px;
-            background: transparent;
-            height: 100%;
+            position: relative;
             display: flex;
             align-items: center;
-            /* Make it slightly smaller to give more space to input */
-            max-width: 100px;
+            margin-right: 10px;
+            height: 100%;
         }
 
-        /* Flag size adjustment */
-        .phone-input-container .PhoneInputCountryIcon {
-            width: 28px !important;
-            height: 20px !important;
-        }
-
-        /* The input field for the country code selector */
+        /* The native Select - Make it invisible but fill the container so it catches clicks */
         .phone-input-container .PhoneInputCountrySelect {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            border: none;
+            opacity: 0;
+            cursor: pointer;
+        }
+
+        /* The Flag Icon */
+        .phone-input-container .PhoneInputCountryIcon {
+            width: 28px;
+            height: 20px;
+            display: block;
+        }
+
+        .phone-input-container .PhoneInputCountryIconImg {
+             width: 100%;
+             height: 100%;
+             display: block;
+        }
+
+        /* The Input Field */
+        .phone-input-container .PhoneInputInput {
+            flex: 1;
             border: none;
             background: transparent;
-            font-size: 1rem;
+            outline: none;
+            font-size: 16px;
             color: #333;
-            padding: 0;
             height: 100%;
-            cursor: pointer;
-            /* Explicitly set width to accommodate flag and country code text */
-            width: 100%;
         }
+        /* ---------------------------------- */
 
-        /* The phone number input field itself */
-        .phone-input-container .PhoneInputInput {
-            border: none !important;
-            background: transparent !important;
-            padding: 0 !important;
-            height: 100%;
-            flex-grow: 1;
-            color: #333;
-            font-size: 1rem;
-            line-height: 48px;
-        }
-
-        /* 5. Button Styling */
+        /* Button Styles */
         .btn-primary {
-            width: 100%;
-            padding: 12px;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            font-weight: bold;
-            font-size: 1.05rem;
-            transition: all 0.3s ease;
-            margin-bottom: 10px; /* Space between buttons */
+            width: 100%; padding: 12px; border: none; border-radius: 8px; cursor: pointer;
+            font-weight: bold; font-size: 1.05rem; transition: all 0.3s ease; margin-bottom: 10px;
+            display: flex; justify-content: center; align-items: center;
         }
+        .btn-primary:hover:not(:disabled) { transform: translateY(-2px); opacity: 0.95; box-shadow: 0 6px 10px rgba(0, 0, 0, 0.2); }
+        .btn-primary:disabled { cursor: not-allowed; opacity: 0.5; transform: none; box-shadow: none; }
 
-        .btn-primary:hover:not(:disabled) {
-            transform: translateY(-2px);
-            opacity: 0.95;
-            box-shadow: 0 6px 10px rgba(0, 0, 0, 0.2);
-        }
+        .btn-send-otp { background-color: #007bff; color: white; margin-top: 20px; }
+        .btn-success { background-color: #28a745; color: white; }
+        .btn-secondary { background-color: #f0f0f0; color: #333; border: 1px solid #ccc; }
+        .btn-google { background-color: white; color: #555; border: 1px solid #ddd; font-weight: 600; margin-top: 0px; }
 
-        .btn-primary:disabled {
-            cursor: not-allowed;
-            opacity: 0.5;
-            transform: none;
-            box-shadow: none;
-        }
+        .divider-container { display: flex; align-items: center; margin: 20px 0; }
+        .divider-line { flex-grow: 1; height: 1px; background-color: rgba(31, 55, 135, 0.3); }
+        .divider-text { margin: 0 10px; color: #1f3787; font-size: 0.9rem; font-weight: 600; }
 
-        /* Specific Button Colors */
-        .btn-send-otp {
-            background-color: #007bff;
-            color: white;
-            box-shadow: 0 4px 6px rgba(0, 123, 255, 0.3);
-        }
-
-        .btn-success {
-            background-color: #28a745;
-            color: white;
-            box-shadow: 0 4px 6px rgba(40, 167, 69, 0.3);
-        }
-
-        .btn-secondary {
-            background-color: #f0f0f0;
-            color: #333;
-            border: 1px solid #ccc;
-            box-shadow: none;
-        }
-
-        /* 6. Feedback messages */
-        .feedback-error {
-            color: #dc3545;
-            text-align: center;
-            font-weight: 600;
-            margin-bottom: 15px;
-        }
-        .feedback-success {
-            color: #28a745;
-            text-align: center;
-            font-weight: 600;
-            margin-bottom: 15px;
-        }
-
-        /* --- RECAPTCHA FIX: Positioning the Badge --- */
-
-        /* 7. Hide the mandatory anchor div to prevent it from affecting form layout */
-        .grecaptcha-badge {
-            display: none;
-        }
+        .feedback-error { color: #dc3545; text-align: center; font-weight: 600; margin-bottom: 15px; }
+        .feedback-success { color: #28a745; text-align: center; font-weight: 600; margin-bottom: 15px; }
+        .grecaptcha-badge { display: none; }
         `}
       </style>
 
-      {/* Main Login Card with Glassmorphism Effect */}
       <div className="glass-card">
         <h2 className="main-title">Shopping Mart Login</h2>
-
-        {/* Display Messages */}
         {error && <p className="feedback-error">{error}</p>}
         {success && <p className="feedback-success">{success}</p>}
-
         {renderContent()}
-
-        {/* Mandatory for Firebase reCAPTCHA - The invisible anchor element */}
         <div id="recaptcha-container"></div>
       </div>
     </div>
@@ -583,4 +554,3 @@ const authorizedNumbers = ['+919999999999', '+918888888888', '+917777777777', '+
 }
 
 export default Login;
-

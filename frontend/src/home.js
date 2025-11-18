@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { getAuth, signOut } from 'firebase/auth';
 import { useNavigate } from 'react-router-dom';
-import { getDatabase, ref, get, set, onValue, remove } from 'firebase/database';
+import { getDatabase, ref, get, set, onValue, remove, push, runTransaction } from 'firebase/database';
 import { initializeApp } from "firebase/app";
 
 // --- START: Firebase Configuration (REPLACE WITH YOUR ACTUAL CONFIG) ---
@@ -26,25 +26,33 @@ function HomePage() {
 
   // --- State for User Data & Flow ---
   const [currentUserType, setCurrentUserType] = useState(null);
-  // FIX: Corrected syntax error by adding useState()
   const [loadingUserType, setLoadingUserType] = useState(true);
   const [activeView, setActiveView] = useState('retailer_marketplace');
   const [showProductForm, setShowProductForm] = useState(false);
   const [showCartPopup, setShowCartPopup] = useState(false);
+  const [showCheckout, setShowCheckout] = useState(false);
 
   // --- NEW STATE for Product Details Popup ---
   const [selectedProduct, setSelectedProduct] = useState(null);
 
+  // --- NEW STATE for Search ---
+  const [searchQuery, setSearchQuery] = useState('');
+
   // --- Notification State ---
   const [notification, setNotification] = useState(null);
 
-  // --- Product & Cart States ---
+  // --- Product & Cart & Order States ---
   const [wholesalerProducts, setWholesalerProducts] = useState([]);
   const [retailerProducts, setRetailerProducts] = useState([]);
   const [myProducts, setMyProducts] = useState([]);
   const [cartItems, setCartItems] = useState({});
   const [loadingProducts, setLoadingProducts] = useState(true);
   const [editingProduct, setEditingProduct] = useState(null);
+
+  // --- MODIFIED ORDER STATES ---
+  const [buyerOrders, setBuyerOrders] = useState([]); // Orders where user is the Buyer (Purchase History)
+  const [sellerOrders, setSellerOrders] = useState([]); // Orders where user is the Seller (Revenue Dashboard)
+  const [totalRevenue, setTotalRevenue] = useState(0); // Total accumulated revenue
 
   // --- Form States (Used for both ADD and EDIT) ---
   const [productName, setProductName] = useState('');
@@ -56,8 +64,14 @@ function HomePage() {
   const [addProductError, setAddProductError] = useState('');
   const [addProductSuccess, setAddProductSuccess] = useState('');
 
+  // --- NEW STATE for Account Dropdown (Mobile Only) ---
+  const [showAccountDropdown, setShowAccountDropdown] = useState(false);
 
-  // --- Data Fetching Logic (UNCHANGED) ---
+  // --- NEW STATE for Marketplace Dropdown (Mobile Only, Retailer) ---
+  const [showMarketDropdown, setShowMarketDropdown] = useState(false);
+
+
+  // --- Data Fetching Logic (UPDATED FOR SEPARATE ORDERS/REVENUE) ---
   useEffect(() => {
     if (!userId) {
       navigate('/');
@@ -76,8 +90,10 @@ function HomePage() {
           if (type === 'wholesaler') {
               setActiveView('catalog');
           } else if (type === 'retailer') {
+              // Retailers default to the Wholesale Market
               setActiveView('marketplace');
           } else {
+              // Consumers default to the Retailer Market
               setActiveView('retailer_marketplace');
           }
 
@@ -151,13 +167,66 @@ function HomePage() {
         console.error("Error reading cart items:", error);
     });
 
+    // NEW: Fetch and Subscribe to Orders (Split into Buyer/Seller)
+    const ordersRef = ref(db, `orders`);
+    const unsubscribeOrders = onValue(ordersRef, (snapshot) => {
+        if (!userId) return; // Ensure user is logged in
+
+        const allOrders = snapshot.val() || {};
+        const loadedBuyerOrders = [];
+        const loadedSellerOrders = [];
+        let calculatedRevenue = 0;
+
+        // Filter orders based on user's role (Buyer or Seller)
+        for (const orderId in allOrders) {
+            const order = { id: orderId, ...allOrders[orderId] };
+
+            // 1. Check if the current user is the BUYER (Purchase History)
+            if (order.buyerId === userId) {
+                loadedBuyerOrders.push({ ...order, role: 'Buyer' });
+            }
+
+            // 2. Check if the current user is a SELLER in any item (Revenue Dashboard)
+            if (currentUserType === 'wholesaler' || currentUserType === 'retailer') {
+                const sellerItems = order.items.filter(item => item.wholesalerId === userId);
+
+                if (sellerItems.length > 0) {
+                    const revenueForThisOrder = sellerItems.reduce((sum, item) => sum + item.subtotal, 0);
+                    calculatedRevenue += revenueForThisOrder; // Accumulate revenue
+
+                    // Create a seller-centric view of the order
+                    loadedSellerOrders.push({
+                        ...order,
+                        items: sellerItems,
+                        totalPrice: revenueForThisOrder, // The 'totalPrice' here is the revenue for this specific seller
+                        role: 'Seller',
+                    });
+                }
+            }
+        }
+
+        // Sort by timestamp (most recent first)
+        loadedBuyerOrders.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        loadedSellerOrders.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+        setBuyerOrders(loadedBuyerOrders);
+        setSellerOrders(loadedSellerOrders);
+        setTotalRevenue(calculatedRevenue);
+
+    }, (error) => {
+        console.error("Error reading orders:", error);
+    });
+    // END NEW ORDER FETCHING
+
     fetchUserType();
 
+    // Dependency array updated to include userId (though already there) and currentUserType (for immediate order filtering)
     return () => {
         unsubscribeProducts();
         unsubscribeCart();
+        unsubscribeOrders(); // Cleanup orders listener
     };
-  }, [userId, navigate]);
+  }, [userId, navigate, currentUserType]);
 
   // --- Notification Timeout Effect (UNCHANGED) ---
   useEffect(() => {
@@ -169,7 +238,7 @@ function HomePage() {
     }
   }, [notification]);
 
-  // --- Utility Handlers (UNCHANGED) ---
+  // --- Utility Handlers ---
 
   const handleLogout = async () => {
     try {
@@ -202,6 +271,19 @@ function HomePage() {
     setAddProductError(''); setAddProductSuccess('');
     setShowProductForm(true);
   };
+
+  // --- NEW: General Navigation Handler (Use this for all view changes) ---
+  const handleNavClick = (view) => {
+      setActiveView(view);
+      setShowProductForm(false);
+      setEditingProduct(null);
+      setShowCheckout(false);
+      setSearchQuery('');
+      setShowAccountDropdown(false);
+      setShowMarketDropdown(false); // NEW: Close market dropdown
+  };
+  // --- END: General Navigation Handler ---
+
 
   // --- Cart Adjustment Logic (for Edit and Delete) (UNCHANGED) ---
 
@@ -303,7 +385,7 @@ function HomePage() {
 
     setProductPhoto(null);
     setAddProductError(''); setAddProductSuccess('');
-    setActiveView('catalog');
+    handleNavClick('catalog'); // Use the unified handler
   };
 
   const handleUpdateProduct = async (e) => {
@@ -331,7 +413,7 @@ function HomePage() {
           quantity: newQuantity,
           photoBase64: photoBase64,
           updatedAt: new Date().toISOString(),
-          minOrderQuantity: newMOQ, // ADDED/UPDATED
+          minOrderQuantity: newMOQ, // UPDATED
       };
 
       await set(productRef, updatedProductData);
@@ -382,7 +464,7 @@ function HomePage() {
       });
       setAddProductSuccess(`Product "${productName}" added successfully!`);
       setShowProductForm(false);
-      setActiveView('catalog');
+      handleNavClick('catalog'); // Use the unified handler
     } catch (error) {
       console.error('Error adding product:', error);
       setAddProductError('Failed to add product.');
@@ -480,11 +562,11 @@ function HomePage() {
     const sellerId = product.wholesalerId;
     const productId = product.id;
     const currentQuantity = cartItems[sellerId]?.[productId]?.quantity || 0;
-    const moq = product.minOrderQuantity || 1;
+    // const moq = product.minOrderQuantity || 1; // Unused here, kept for completeness
 
     let requestedQuantity;
 
-    if (change === -1 && currentQuantity <= moq && currentQuantity > 0) {
+    if (change === -1 && currentQuantity <= (product.minOrderQuantity || 1) && currentQuantity > 0) {
         // NEW LOGIC: If decreasing and we are at or below MOQ, set requestedQuantity to 0 (removal).
         requestedQuantity = 0;
     } else {
@@ -522,12 +604,161 @@ function HomePage() {
     updateCartItem(product, newQuantity);
   };
 
+  // --- Order Placement Logic (UNCHANGED) ---
+
+  // Utility function to get flattened, current cart items for display/checkout
+  const getCartDisplayItems = () => {
+    // 1. Create a consolidated map of all currently available products
+    const allAvailableProducts = [...wholesalerProducts, ...retailerProducts, ...myProducts];
+    const allAvailableProductsMap = allAvailableProducts.reduce((acc, product) => {
+        acc[product.id] = product;
+        return acc;
+    }, {});
+
+
+    // 2. Flatten and process cart items
+    return Object.values(cartItems).flatMap(Object.values).map(cartItem => {
+        const productDetails = allAvailableProductsMap[cartItem.productId];
+
+        if (productDetails) {
+            const moq = productDetails.minOrderQuantity || 1;
+            return {
+                ...cartItem,
+                name: productDetails.name,
+                price: productDetails.price,
+                photoBase64: productDetails.photoBase64,
+                wholesalerName: productDetails.wholesalerName,
+                // Re-check validity based on the latest stock data
+                isOverstocked: cartItem.quantity > productDetails.quantity,
+                isBelowMOQ: cartItem.quantity < moq,
+                availableStock: productDetails.quantity,
+                subtotal: cartItem.quantity * productDetails.price,
+                moq: moq,
+            };
+        }
+
+        return {
+            ...cartItem,
+            name: 'DELETED PRODUCT',
+            price: 0,
+            subtotal: 0,
+            isDeleted: true
+        };
+    });
+  };
+
+  const handlePlaceOrder = async () => {
+    const items = getCartDisplayItems();
+
+    // Check for invalid items (deleted, overstocked, or below MOQ)
+    const invalidItems = items.filter(item => item.isDeleted || item.isOverstocked || item.isBelowMOQ);
+
+    if (invalidItems.length > 0) {
+        setNotification('🚨 Cannot place order: One or more items in your cart are invalid (e.g., deleted, out of stock, or below MOQ). Please correct your cart.');
+        setShowCheckout(false);
+        setShowCartPopup(true); // Open cart popup to show issues
+        return;
+    }
+
+    if (items.length === 0) {
+        setNotification('🚨 Your cart is empty. Cannot place an order.');
+        setShowCheckout(false);
+        return;
+    }
+
+    const totalOrderPrice = items.reduce((total, item) => total + item.subtotal, 0);
+
+    const orderData = {
+        buyerId: userId,
+        buyerName: user.displayName || 'Unknown User',
+        timestamp: new Date().toISOString(),
+        totalPrice: totalOrderPrice,
+        status: 'Pending', // Initial status
+        items: items.map(item => ({
+            productId: item.productId,
+            wholesalerId: item.wholesalerId,
+            productName: item.name,
+            price: item.price,
+            quantity: item.quantity,
+            subtotal: item.subtotal,
+            wholesalerName: item.wholesalerName,
+        }))
+    };
+
+    try {
+        // STEP 1: Deduct Stock Atomically using Transactions
+        const stockDeductionPromises = items.map(item => {
+            const productRef = ref(db, `products/${item.productId}`);
+
+            // Use runTransaction for atomic stock deduction
+            return runTransaction(productRef, (currentData) => {
+                if (currentData) {
+                    const availableStock = currentData.quantity;
+                    const purchaseQuantity = item.quantity;
+
+                    if (availableStock < purchaseQuantity) {
+                        // Stock insufficient, abort transaction
+                        console.warn(`Transaction aborted for product ${item.productId}. Requested: ${purchaseQuantity}, Available: ${availableStock}`);
+                        return;
+                    }
+
+                    // Deduct stock
+                    currentData.quantity = availableStock - purchaseQuantity;
+                    return currentData; // Commit the updated data
+                } else {
+                    // Product deleted during checkout, abort
+                    console.warn(`Transaction aborted for product ${item.productId}. Product not found.`);
+                    return;
+                }
+            });
+        });
+
+        // Wait for all stock deductions to complete
+        const transactionResults = await Promise.all(stockDeductionPromises);
+
+        // Check if any transaction failed (returned null/undefined result, which means abort)
+        // Note: The transaction object returned by runTransaction has a `committed` property
+        const failedTransaction = transactionResults.find(result => !result || !result.committed);
+
+        if (failedTransaction) {
+            // A transaction failed (e.g., stock was insufficient).
+            // Cannot easily roll back other successful deductions in RTDB.
+            setNotification('🚨 Order failed! Stock changed for one or more items during checkout. Please review your cart and try again.');
+            setShowCheckout(false);
+            return;
+        }
+
+
+        // STEP 2: Write the order to the /orders path (only if all stock deductions succeeded)
+        const ordersRef = ref(db, 'orders');
+        await push(ordersRef, orderData);
+
+        // STEP 3: Clear the user's cart
+        const cartRef = ref(db, `carts/${userId}`);
+        await remove(cartRef);
+
+        // STEP 4: Update local state/view
+        setCartItems({});
+        setShowCheckout(false);
+        setNotification(`🎉 Order placed successfully! Total: **₹ ${totalOrderPrice.toFixed(2)}**.`);
+
+        // Optionally navigate to a default view
+        const defaultView = currentUserType === 'wholesaler' ? 'catalog' : 'marketplace';
+        setActiveView(defaultView);
+
+    } catch (error) {
+        console.error('Error placing order:', error);
+        setNotification('🚨 Failed to place order. Please try again.');
+    }
+  };
+
+
   // --- Inline Component for Quantity Control (UNCHANGED) ---
   const CartQuantityControl = ({ product }) => {
     const sellerId = product.wholesalerId;
     const productId = product.id;
     const currentQuantity = cartItems[sellerId]?.[productId]?.quantity || 0;
-    const moq = product.minOrderQuantity || 1;
+    // const moq = product.minOrderQuantity || 1; // Unused here, kept for completeness
 
     return (
       <div className="quantity-control-container">
@@ -578,7 +809,7 @@ function HomePage() {
     );
   };
 
-  // --- Product Detail Popup (UPDATED CSS CLASS) ---
+  // --- Product Detail Popup (UNCHANGED) ---
   const renderProductDetailPopup = () => {
     if (!selectedProduct) return null;
 
@@ -647,37 +878,107 @@ function HomePage() {
   };
 
 
-  // --- Render Sections (UNCHANGED) ---
+  // --- Render Sections (UPDATED WITH IMPROVED FORM UI) ---
 
   const renderProductForm = (isEditing) => (
-    <div className="form-container" style={{ border: `1px solid var(${isEditing ? '--color-warning' : '--color-primary'})` }}>
-        <h3 style={{ color: `var(${isEditing ? '--color-warning' : '--color-primary'})` }}>
-            {isEditing ? `Edit Product: ${editingProduct.name}` : 'Add New Product'} 🛍️
-        </h3>
-        {addProductError && <p className="form-error">{addProductError}</p>}
-        {addProductSuccess && <p className="form-success">{addProductSuccess}</p>}
+    <div className="form-container" style={{ border: `1px solid var(${isEditing ? '--color-warning' : '--color-primary'})`, maxWidth: '700px', margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: '25px' }}>
+             <h3 style={{ color: `var(${isEditing ? '--color-warning' : '--color-primary'})`, fontSize: '1.8rem', margin: '0' }}>
+                {isEditing ? '✏️ Edit Product' : '📦 Add New Product'}
+            </h3>
+            <p style={{ color: 'var(--color-secondary)', marginTop: '5px' }}>
+                {isEditing ? `Updating: ${editingProduct.name}` : 'Fill in the details to list your product.'}
+            </p>
+        </div>
+
+        {addProductError && <div className="form-error" style={{ textAlign: 'center', marginBottom: '15px' }}>{addProductError}</div>}
+        {addProductSuccess && <div className="form-success" style={{ textAlign: 'center', marginBottom: '15px' }}>{addProductSuccess}</div>}
 
         <form onSubmit={isEditing ? handleUpdateProduct : handleAddProduct}>
-          <label>Name:</label><input type="text" value={productName} onChange={(e) => setProductName(e.target.value)} required />
-          <label>Price (₹):</label><input type="number" value={productPrice} onChange={(e) => setProductPrice(e.target.value)} required min="0.01" step="0.01" />
-          <label>Quantity (Stock):</label><input type="number" value={productQuantity} onChange={(e) => setProductQuantity(e.target.value)} required min="1" step="1" />
 
-          {/* Minimum Order Quantity Field */}
-          <label>Minimum Order Quantity (Optional, Default 1):</label>
-          <input
-            type="number"
-            value={minOrderQuantity}
-            onChange={(e) => setMinOrderQuantity(e.target.value)}
-            min="1"
-            step="1"
-            placeholder="1"
-          />
+          {/* Product Name */}
+          <div className="form-group">
+            <label>Product Name</label>
+            <input
+                type="text"
+                className="form-control"
+                value={productName}
+                onChange={(e) => setProductName(e.target.value)}
+                placeholder="e.g., Organic Almonds 500g"
+                required
+            />
+          </div>
 
-          <label>{isEditing ? 'Change Photo (Optional):' : 'Photo:'}</label>
-          <input type="file" accept="image/*" onChange={handlePhotoChange} required={!isEditing} />
-          {(isEditing && editingProduct.photoBase64) && <img src={editingProduct.photoBase64} alt="Current" style={{ maxWidth: '80px', maxHeight: '80px', objectFit: 'contain', marginTop: '5px', border: '1px solid #ddd' }} />}
+          {/* Grid for Numbers */}
+          <div className="form-grid">
+              <div className="form-group">
+                <label>Price (₹)</label>
+                <input
+                    type="number"
+                    className="form-control"
+                    value={productPrice}
+                    onChange={(e) => setProductPrice(e.target.value)}
+                    required
+                    min="0.01"
+                    step="0.01"
+                    placeholder="0.00"
+                />
+              </div>
+              <div className="form-group">
+                <label>Stock Quantity</label>
+                <input
+                    type="number"
+                    className="form-control"
+                    value={productQuantity}
+                    onChange={(e) => setProductQuantity(e.target.value)}
+                    required
+                    min="1"
+                    step="1"
+                    placeholder="Available units"
+                />
+              </div>
+          </div>
 
-          <div className="form-action-buttons">
+          {/* Grid for MOQ and Photo */}
+          <div className="form-grid">
+              <div className="form-group">
+                <label>Minimum Order Qty (MOQ)</label>
+                <input
+                    type="number"
+                    className="form-control"
+                    value={minOrderQuantity}
+                    onChange={(e) => setMinOrderQuantity(e.target.value)}
+                    min="1"
+                    step="1"
+                    placeholder="Default: 1"
+                />
+              </div>
+              <div className="form-group">
+                 <label>{isEditing ? 'Update Photo (Optional)' : 'Product Photo'}</label>
+                 <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handlePhotoChange}
+                    required={!isEditing}
+                    style={{ padding: '8px' }} // Slight adjustment for file input
+                 />
+              </div>
+          </div>
+
+          {/* Image Preview Area */}
+          {(productPhoto || (isEditing && editingProduct.photoBase64)) && (
+              <div className="image-preview-container">
+                  <p style={{ fontSize: '0.8em', color: '#666', marginBottom: '5px' }}>Preview:</p>
+                  <img
+                    src={productPhoto ? URL.createObjectURL(productPhoto) : editingProduct.photoBase64}
+                    alt="Preview"
+                    style={{ maxWidth: '100%', maxHeight: '200px', objectFit: 'contain', borderRadius: '8px' }}
+                  />
+              </div>
+          )}
+
+          {/* Action Buttons */}
+          <div className="form-action-buttons" style={{ marginTop: '30px' }}>
             {isEditing ? (
                 <>
                     <button type="submit" disabled={addProductLoading} className="btn-warning btn-full-width">
@@ -745,137 +1046,149 @@ function HomePage() {
     </div>
   );
 
-  const renderWholesalerMarketplace = () => (
-    <div style={{ marginTop: '20px' }}>
-      <h3 className="section-header" style={{ color: 'var(--color-primary)' }}>Wholesale Marketplace ({wholesalerProducts.length})</h3>
-      {wholesalerProducts.length === 0 ? (
-        <p>No products currently listed by wholesalers.</p>
-      ) : (
-        <div className="product-grid">
-          {wholesalerProducts.map((product) => {
-            const currentQuantity = cartItems[product.wholesalerId]?.[product.id]?.quantity || 0;
-            const isOutOfStock = product.quantity <= 0;
-            const isInCart = currentQuantity > 0;
-            const moq = product.minOrderQuantity || 1;
+  const renderWholesalerMarketplace = () => {
+    // Filter products based on search query
+    const filteredProducts = wholesalerProducts.filter(product =>
+        product.name.toLowerCase().includes(searchQuery.toLowerCase())
+    );
 
-            return (
-              <div
-                key={product.id}
-                className="product-card"
-                style={{ opacity: isOutOfStock ? 0.6 : 1, cursor: 'pointer' }}
-                onClick={() => setSelectedProduct(product)}
-              >
-                <img src={product.photoBase64} alt={product.name} />
-                <p className="product-name">{product.name}</p>
-                <p className="product-price">Price: ₹ {product.price.toFixed(2)}</p>
-                <p className="product-moq-label">MOQ: {moq}</p>
+    return (
+      <div style={{ marginTop: '20px' }}>
+        <h3 className="section-header" style={{ color: 'var(--color-primary)' }}>Wholesale Marketplace ({wholesalerProducts.length})</h3>
 
-                {isInCart ? (
-                    // Stop propagation so clicking the cart control doesn't open the popup
-                    <div onClick={(e) => e.stopPropagation()}>
-                        <CartQuantityControl product={product} />
-                    </div>
-                ) : (
-                    <button onClick={(e) => { e.stopPropagation(); handleAddToCart(product); }} disabled={isOutOfStock} className="btn-add-to-cart">
-                      {isOutOfStock ? '🚫 Out of Stock' : `🛒 Add (Min ${moq})`}
-                    </button>
-                )}
-              </div>
-            );
-          })}
+        {/* SEARCH BAR ADDED */}
+        <div style={{ marginBottom: '20px' }}>
+            <input
+                type="text"
+                placeholder="🔍 Search products..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                style={{ width: '100%', padding: '12px', borderRadius: 'var(--border-radius)', border: '1px solid #ccc', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.1)' }}
+            />
         </div>
-      )}
-    </div>
-  );
 
-  const renderRetailerMarketplace = () => (
-    <div style={{ marginTop: '20px' }}>
-      <h3 className="section-header" style={{ color: 'var(--color-info)' }}>Retailer Marketplace ({retailerProducts.length})</h3>
-      {retailerProducts.length === 0 ? (
-        <p>No products currently listed by other retailers.</p>
-      ) : (
-        <div className="product-grid">
-          {retailerProducts.map((product) => {
-            const currentQuantity = cartItems[product.wholesalerId]?.[product.id]?.quantity || 0;
-            const isOutOfStock = product.quantity <= 0;
-            const isInCart = currentQuantity > 0;
-            const moq = product.minOrderQuantity || 1;
+        {filteredProducts.length === 0 ? (
+          <p>{searchQuery ? 'No products match your search.' : 'No products currently listed by wholesalers.'}</p>
+        ) : (
+          <div className="product-grid">
+            {filteredProducts.map((product) => {
+              const currentQuantity = cartItems[product.wholesalerId]?.[product.id]?.quantity || 0;
+              const isOutOfStock = product.quantity <= 0;
+              const isInCart = currentQuantity > 0;
+              const moq = product.minOrderQuantity || 1;
 
-            return (
-              <div
-                key={product.id}
-                className="product-card"
-                style={{ opacity: isOutOfStock ? 0.6 : 1, cursor: 'pointer' }}
-                onClick={() => setSelectedProduct(product)}
-              >
-                <img src={product.photoBase64} alt={product.name} />
-                <p className="product-name">{product.name}</p>
-                <p className="product-price">Price: ₹ {product.price.toFixed(2)}</p>
-                <p className="product-moq-label">MOQ: {moq} | Seller: {product.wholesalerName}</p>
+              return (
+                <div
+                  key={product.id}
+                  className="product-card"
+                  style={{ opacity: isOutOfStock ? 0.6 : 1, cursor: 'pointer' }}
+                  onClick={() => setSelectedProduct(product)}
+                >
+                  <div>
+                    <img src={product.photoBase64} alt={product.name} />
+                    <p className="product-name">{product.name}</p>
+                    <p className="product-price">Price: ₹ {product.price.toFixed(2)}</p>
+                    <p className="product-moq-label">MOQ: {moq}</p>
+                  </div>
 
-                {isInCart ? (
-                    // Stop propagation so clicking the cart control doesn't open the popup
-                    <div onClick={(e) => e.stopPropagation()}>
-                        <CartQuantityControl product={product} />
-                    </div>
-                ) : (
-                    <button onClick={(e) => { e.stopPropagation(); handleAddToCart(product); }} disabled={isOutOfStock} className="btn-add-to-cart">
-                      {isOutOfStock ? '🚫 Out of Stock' : `🛒 Add (Min ${moq})`}
-                    </button>
-                )}
-              </div>
-            );
-          })}
+                  {isInCart ? (
+                      // Stop propagation so clicking the cart control doesn't open the popup
+                      <div onClick={(e) => e.stopPropagation()}>
+                          <CartQuantityControl product={product} />
+                      </div>
+                  ) : (
+                      <button onClick={(e) => { e.stopPropagation(); handleAddToCart(product); }} disabled={isOutOfStock} className="btn-add-to-cart">
+                        {isOutOfStock ? '🚫 Out of Stock' : `🛒 Add (Min ${moq})`}
+                      </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderRetailerMarketplace = () => {
+    // Filter products based on search query
+    const filteredProducts = retailerProducts.filter(product =>
+        product.name.toLowerCase().includes(searchQuery.toLowerCase())
+    );
+
+    return (
+      <div style={{ marginTop: '20px' }}>
+        <h3 className="section-header" style={{ color: 'var(--color-info)' }}>Retailer Marketplace ({retailerProducts.length})</h3>
+
+        {/* SEARCH BAR ADDED */}
+        <div style={{ marginBottom: '20px' }}>
+            <input
+                type="text"
+                placeholder="🔍 Search products..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                style={{ width: '100%', padding: '12px', borderRadius: 'var(--border-radius)', border: '1px solid #ccc', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.1)' }}
+            />
         </div>
-      )}
-    </div>
-  );
+
+        {filteredProducts.length === 0 ? (
+          <p>{searchQuery ? 'No products match your search.' : 'No products currently listed by other retailers.'}</p>
+        ) : (
+          <div className="product-grid">
+            {filteredProducts.map((product) => {
+              const currentQuantity = cartItems[product.wholesalerId]?.[product.id]?.quantity || 0;
+              const isOutOfStock = product.quantity <= 0;
+              const isInCart = currentQuantity > 0;
+              const moq = product.minOrderQuantity || 1;
+
+              return (
+                <div
+                  key={product.id}
+                  className="product-card"
+                  style={{ opacity: isOutOfStock ? 0.6 : 1, cursor: 'pointer' }}
+                  onClick={() => setSelectedProduct(product)}
+                >
+                  <div>
+                    <img src={product.photoBase64} alt={product.name} />
+                    <p className="product-name">{product.name}</p>
+                    <p className="product-price">Price: ₹ {product.price.toFixed(2)}</p>
+                    <p className="product-moq-label">MOQ: {moq} | Seller: {product.wholesalerName}</p>
+                  </div>
+
+                  {isInCart ? (
+                      // Stop propagation so clicking the cart control doesn't open the popup
+                      <div onClick={(e) => e.stopPropagation()}>
+                          <CartQuantityControl product={product} />
+                      </div>
+                  ) : (
+                      <button onClick={(e) => { e.stopPropagation(); handleAddToCart(product); }} disabled={isOutOfStock} className="btn-add-to-cart">
+                        {isOutOfStock ? '🚫 Out of Stock' : `🛒 Add (Min ${moq})`}
+                      </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const renderCartPopup = () => {
-    // 1. Create a consolidated map of all currently available products
-    const allAvailableProducts = [...wholesalerProducts, ...retailerProducts, ...myProducts];
-    const allAvailableProductsMap = allAvailableProducts.reduce((acc, product) => {
-        acc[product.id] = product;
-        return acc;
-    }, {});
-
-
-    // 2. Flatten and process cart items
-    const cartDisplayItems = Object.values(cartItems).flatMap(Object.values).map(cartItem => {
-        const productDetails = allAvailableProductsMap[cartItem.productId];
-
-        if (productDetails) {
-            const moq = productDetails.minOrderQuantity || 1;
-            return {
-                ...cartItem,
-                name: productDetails.name,
-                price: productDetails.price,
-                photoBase64: productDetails.photoBase64,
-                wholesalerName: productDetails.wholesalerName,
-                isOverstocked: cartItem.quantity > productDetails.quantity,
-                isBelowMOQ: cartItem.quantity < moq, // Check if below MOQ
-                availableStock: productDetails.quantity,
-                subtotal: cartItem.quantity * productDetails.price,
-                moq: moq,
-            };
-        }
-
-        return {
-            ...cartItem,
-            name: 'DELETED PRODUCT',
-            price: 0,
-            subtotal: 0,
-            isDeleted: true
-        };
-    });
-
+    // Get the prepared cart items for display/checkout
+    const cartDisplayItems = getCartDisplayItems();
 
     let totalItems = 0;
     let totalPrice = 0;
+    let hasInvalidItems = false;
 
     cartDisplayItems.forEach(item => {
         totalItems += item.quantity;
         totalPrice += item.subtotal;
+
+        if (item.isDeleted || item.isOverstocked || item.isBelowMOQ) {
+            hasInvalidItems = true;
+        }
     });
 
     return (
@@ -913,7 +1226,22 @@ function HomePage() {
 
               <div className="cart-total">
                 <strong>Subtotal: ₹ {totalPrice.toFixed(2)}</strong>
-                <button className="btn-primary" style={{ marginTop: '15px', width: '100%' }}>Proceed to Checkout</button>
+                <button
+                    className="btn-primary"
+                    style={{ marginTop: '15px', width: '100%' }}
+                    onClick={() => { // ADDED onClick handler to switch to checkout view
+                        setShowCartPopup(false);
+                        setShowCheckout(true);
+                    }}
+                    disabled={totalItems === 0 || hasInvalidItems} // Disable if empty or invalid
+                >
+                    Proceed to Checkout
+                </button>
+                {hasInvalidItems && (
+                    <p style={{ color: 'var(--color-danger)', fontSize: '0.9em', marginTop: '10px' }}>
+                        *Please resolve cart errors before proceeding.
+                    </p>
+                )}
               </div>
             </>
           )}
@@ -922,26 +1250,294 @@ function HomePage() {
     );
   };
 
+  // --- Checkout Page Render (UPDATED UI) ---
+  const renderCheckoutPage = () => {
+    const cartDisplayItems = getCartDisplayItems();
+    const totalOrderPrice = cartDisplayItems.reduce((total, item) => total + item.subtotal, 0);
+    const totalItems = cartDisplayItems.reduce((sum, item) => sum + item.quantity, 0);
 
-  // --- Main Render Logic ---
+    return (
+        <div>
+            <h3 className="section-header" style={{ color: 'var(--color-primary)' }}>
+                Checkout 🛍️
+            </h3>
+
+            {/* NEW: Split Layout Container */}
+            <div className="checkout-layout">
+
+                {/* Left Column: Item List with Images */}
+                <div className="checkout-items-column">
+                    {cartDisplayItems.map((item, index) => (
+                        <div key={item.productId + index} className="checkout-item-card">
+                             {/* Thumbnail Image */}
+                             <img
+                                src={item.photoBase64}
+                                alt={item.name}
+                                className="checkout-item-img"
+                            />
+
+                            {/* Item Details */}
+                            <div className="checkout-item-info">
+                                <h4 style={{ margin: '0 0 5px 0', color: 'var(--color-text-dark)' }}>{item.name}</h4>
+                                <p style={{ margin: 0, color: 'var(--color-secondary)', fontSize: '0.9em' }}>
+                                    Price: ₹ {item.price.toFixed(2)} | Qty: {item.quantity}
+                                </p>
+                                <p style={{ margin: '5px 0 0 0', fontSize: '0.85em', fontStyle: 'italic', color: 'var(--color-secondary)' }}>
+                                    Seller: {item.wholesalerName}
+                                </p>
+                            </div>
+
+                            {/* Subtotal */}
+                            <div className="checkout-item-total">
+                                ₹ {item.subtotal.toFixed(2)}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+
+                {/* Right Column: Order Summary (Sticky) */}
+                <div className="checkout-summary-column">
+                    <div className="summary-card">
+                        <h4 style={{ marginTop: 0, borderBottom: '1px solid #eee', paddingBottom: '10px' }}>Order Summary</h4>
+
+                        <div className="summary-row">
+                            <span>Total Items:</span>
+                            <span>{totalItems}</span>
+                        </div>
+                        <div className="summary-row">
+                            <span>Subtotal:</span>
+                            <span>₹ {totalOrderPrice.toFixed(2)}</span>
+                        </div>
+                        <div className="summary-row" style={{color: 'var(--color-success)'}}>
+                            <span>Shipping:</span>
+                            <span>Free</span>
+                        </div>
+
+                        <div className="summary-row summary-total">
+                            <span>Total:</span>
+                            <span style={{ color: 'var(--color-primary)' }}>₹ {totalOrderPrice.toFixed(2)}</span>
+                        </div>
+
+                        <button
+                            className="btn-primary"
+                            style={{ width: '100%', marginTop: '20px', padding: '12px', fontSize: '1.1em' }}
+                            onClick={handlePlaceOrder}
+                        >
+                            Confirm Order
+                        </button>
+                        <button
+                            className="btn-secondary"
+                            style={{ width: '100%', marginTop: '10px' }}
+                            onClick={() => { setShowCheckout(false); setShowCartPopup(true); }}
+                        >
+                            Back to Cart
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+  };
+
+  // --- NEW: Purchase History Page Render (Buyer's Orders) ---
+  const renderPurchaseHistoryPage = () => {
+    if (buyerOrders.length === 0) {
+        return (
+            <div className="form-container">
+                <h3 className="section-header" style={{ color: 'var(--color-primary)' }}>
+                    Purchase History 🧾
+                </h3>
+                <p>No purchase history found. Start shopping!</p>
+            </div>
+        );
+    }
+
+    return (
+        <div style={{ marginTop: '20px' }}>
+            <h3 className="section-header" style={{ color: 'var(--color-primary)' }}>
+                Purchase History ({buyerOrders.length})
+            </h3>
+            <div className="order-history-list">
+                {buyerOrders.map((order) => (
+                    <div key={order.id} className="order-card">
+                        <div className="order-header order-buyer-header">
+                            <span className="order-role" style={{ backgroundColor: 'rgba(255, 255, 255, 0.2)' }}>
+                                PURCHASE
+                            </span>
+                            <span className="order-date">
+                                {new Date(order.timestamp).toLocaleDateString()}
+                            </span>
+                        </div>
+                        <div className="order-body">
+                            <p><strong>Order ID:</strong> {order.id.substring(0, 10)}...</p>
+                            <p>
+                                <strong>Total Cost:</strong>
+                                <span style={{ color: 'var(--color-primary)', fontWeight: 'bold', marginLeft: '5px' }}>
+                                    ₹ {order.totalPrice.toFixed(2)}
+                                </span>
+                            </p>
+                            <p><strong>Items Count:</strong> {order.items.length}</p>
+
+                            <h5 style={{ marginTop: '10px', borderBottom: '1px solid var(--color-light-gray)', paddingBottom: '5px', color: 'var(--color-primary)' }}>Items Purchased:</h5>
+                            <ul className="order-items-list">
+                                {order.items.map((item, index) => (
+                                    <li key={item.productId + index}>
+                                        <span>{item.productName}</span>
+                                        <div className="item-details">
+                                            <span className="item-quantity">x{item.quantity}</span>
+                                            <span className="item-price">
+                                                ₹ {(item.price * item.quantity).toFixed(2)}
+                                            </span>
+                                        </div>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+  };
+
+  // --- NEW: Revenue Dashboard Page Render (Seller's Orders and Total Revenue) ---
+  const renderRevenueDashboard = () => {
+    const isSeller = currentUserType === 'wholesaler' || currentUserType === 'retailer';
+
+    if (!isSeller) {
+        return (
+            <div className="form-container">
+                <h3 className="section-header" style={{ color: 'var(--color-danger)' }}>
+                    Access Denied
+                </h3>
+                <p>Only Wholesalers and Retailers can access the Revenue Dashboard.</p>
+            </div>
+        );
+    }
+
+    return (
+        <div style={{ marginTop: '20px' }}>
+            <h3 className="section-header" style={{ color: 'var(--color-success)' }}>
+                Revenue Dashboard 📊
+            </h3>
+
+            {/* Total Revenue Card */}
+            <div className="revenue-card">
+                <p style={{ margin: 0, fontSize: '1.2em', fontWeight: 'bold' }}>Total Lifetime Revenue</p>
+                <h2>₹ {totalRevenue.toFixed(2)}</h2>
+                <p style={{ margin: '5px 0 0 0', fontSize: '0.9em' }}>
+                    from {sellerOrders.length} {sellerOrders.length === 1 ? 'order' : 'orders'}
+                </p>
+            </div>
+
+            <h3 className="section-header" style={{ color: 'var(--color-secondary)' }}>
+                Sales History
+            </h3>
+
+            {sellerOrders.length === 0 ? (
+                <p>No products purchased from you yet.</p>
+            ) : (
+                <div className="order-history-list">
+                    {sellerOrders.map((order) => (
+                        <div key={order.id} className="order-card">
+                            <div className="order-header order-seller-header">
+                                <span className="order-role" style={{ backgroundColor: 'rgba(255, 255, 255, 0.2)' }}>
+                                    SALE
+                                </span>
+                                <span className="order-date">
+                                    {new Date(order.timestamp).toLocaleDateString()}
+                                </span>
+                            </div>
+                            <div className="order-body">
+                                <p><strong>Order ID:</strong> {order.id.substring(0, 10)}...</p>
+                                <p>
+                                    <strong>Revenue:</strong>
+                                    <span style={{ color: 'var(--color-success)', fontWeight: 'bold', marginLeft: '5px' }}>
+                                        ₹ {order.totalPrice.toFixed(2)}
+                                    </span>
+                                </p>
+                                <p><strong>Buyer:</strong> {order.buyerName}</p>
+
+                                <h5 style={{ marginTop: '10px', borderBottom: '1px solid var(--color-light-gray)', paddingBottom: '5px', color: 'var(--color-success)' }}>Your Items Sold:</h5>
+                                <ul className="order-items-list">
+                                    {order.items.map((item, index) => (
+                                        <li key={item.productId + index}>
+                                            <span>{item.productName}</span>
+                                            <div className="item-details">
+                                                <span className="item-quantity">x{item.quantity}</span>
+                                                <span className="item-price">
+                                                    ₹ {(item.price * item.quantity).toFixed(2)}
+                                                </span>
+                                            </div>
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+  };
+
+  // --- NEW: Account Dropdown Render Function (Mobile Only) ---
+  const renderAccountDropdown = () => {
+    // Determine which links to show
+    const showRevenue = currentUserType === 'wholesaler' || currentUserType === 'retailer';
+    const showHistory = !!currentUserType; // All logged-in users can view history
+
+    if (!showHistory && !showRevenue) return null;
+
+    return (
+        <div className="account-dropdown">
+            {showHistory && (
+                <button
+                    className={`dropdown-item ${activeView === 'purchase_history' ? 'active' : ''}`}
+                    onClick={() => handleNavClick('purchase_history')}
+                >
+                    🧾 Purchase History
+                </button>
+            )}
+            {showRevenue && (
+                <button
+                    className={`dropdown-item ${activeView === 'revenue_dashboard' ? 'active' : ''}`}
+                    onClick={() => handleNavClick('revenue_dashboard')}
+                >
+                    📊 Revenue Dashboard
+                </button>
+            )}
+        </div>
+    );
+  };
+
+
+  // --- Main Render Logic (UPDATED) ---
 
   if (loadingUserType || loadingProducts) {
     return <div style={{ padding: '50px', textAlign: 'center' }}>Loading...</div>;
   }
 
-  // isBuyer is true for both 'wholesaler' and 'retailer'
-  const isBuyer = currentUserType !== 'consumer';
+  // All logged-in users are 'buyers' in terms of purchase history.
+  const isSeller = currentUserType === 'wholesaler' || currentUserType === 'retailer';
+  const canViewPurchaseHistory = !!currentUserType; // All logged-in users can view history
   const totalItems = Object.values(cartItems).flatMap(Object.values).reduce((sum, item) => sum + item.quantity, 0);
 
   let content;
-  if (editingProduct) {
+  if (showCheckout) {
+    content = renderCheckoutPage();
+  } else if (editingProduct) {
     content = renderProductForm(true);
   } else if (showProductForm) {
     content = renderProductForm(false);
-  } else if (activeView === 'catalog' && isBuyer) {
+  } else if (activeView === 'purchase_history') {
+    content = renderPurchaseHistoryPage();
+  } else if (activeView === 'revenue_dashboard') {
+    content = renderRevenueDashboard();
+  } else if (activeView === 'catalog' && isSeller) {
     content = renderMyProductsList();
   } else if (activeView === 'marketplace' && currentUserType !== 'consumer') {
-    // Wholesaler Market visible only to Wholesalers/Retailers
+    // Wholesaler Market visible only to Wholesaler/Retailer
     content = renderWholesalerMarketplace();
   } else if (activeView === 'retailer_marketplace' && (currentUserType === 'retailer' || currentUserType === 'consumer')) {
     // Retailer Market visible only to Retailers and Consumers
@@ -949,14 +1545,12 @@ function HomePage() {
   } else {
     // Default Fallback Logic
     if (currentUserType === 'wholesaler' || currentUserType === 'retailer') {
-        // Wholesaler/Retailer defaults to Wholesaler Marketplace
+        // Default to Wholesale Market
+        handleNavClick('marketplace');
         content = renderWholesalerMarketplace();
-        // Set view to 'marketplace' if a Wholesaler was stuck on 'retailer_marketplace'
-        if (currentUserType === 'wholesaler' && activeView === 'retailer_marketplace') {
-            setActiveView('marketplace');
-        }
     } else {
-        // Consumer defaults to Retailer Marketplace
+        // Default to Retailer Market
+        handleNavClick('retailer_marketplace');
         content = renderRetailerMarketplace();
     }
   }
@@ -964,7 +1558,7 @@ function HomePage() {
 
   return (
     <div style={{ fontFamily: 'Arial, sans-serif', margin: 0, padding: 0, backgroundColor: 'var(--color-background)', minHeight: '100vh' }}>
-      {/* 1. Global Styles and CSS Variables */}
+      {/* 1. Global Styles and CSS Variables (UPDATED WITH DROPDOWN STYLES) */}
       <style>{`
         /* --- Material Icons Link --- */
         @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0&icon_names=power_settings_new');
@@ -1012,8 +1606,28 @@ function HomePage() {
         }
 
 
-        .header { background-color: var(--color-header); color: white; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; position: fixed; top: 0; left: 0; right: 0; z-index: 1000; height: 50px; }
-        .nav-links-mobile { display: none; } /* Hidden by default */
+        /*
+         * HEADER (Top Navbar) - MODIFIED: Now visible on desktop
+         */
+        .header {
+            background-color: var(--color-header);
+            color: white;
+            padding: 10px 20px;
+            display: flex; /* MODIFIED: Change from 'none' to 'flex' */
+            justify-content: space-between;
+            align-items: center;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 1000;
+            height: 50px;
+        }
+        .nav-links-mobile {
+            display: none; /* MODIFIED: Hide mobile links on desktop */
+            gap: 5px;
+            padding-left: 5px;
+        }
         .header-left { display: flex; align-items: center; }
 
         .icon-btn { background: none; border: none; color: white; cursor: pointer; font-size: 1.5rem; margin: 0 5px; padding: 5px; position: relative; transition: color var(--transition-speed); }
@@ -1021,15 +1635,16 @@ function HomePage() {
 
         .cart-badge { font-size: 0.6em; position: absolute; top: 5px; right: 15px; background-color: var(--color-danger); color: white; border-radius: 50%; padding: 2px 5px; }
 
-        /* --- SIDEBAR (Desktop View) --- */
+        /* * SIDEBAR (Desktop View)
+         */
         .sidebar {
             position: fixed;
-            top: 60px;
+            top: 50px; /* Starts 50px down (below the header) */
             left: 0;
             width: 60px;
-            height: 100%;
+            height: calc(100% - 50px); /* Adjust height to fill below header */
             background-color: var(--color-background);
-            padding-top: 20px;
+            padding-top: 25px; /* MODIFIED: Increased from 10px to 25px to move buttons down */
             border-right: 1px solid #ddd;
             z-index: 999;
         }
@@ -1061,13 +1676,93 @@ function HomePage() {
             color: var(--color-primary);
         }
 
+        /* --- Mobile Navigation Links --- */
+        .nav-item-mobile {
+            background: none;
+            border: none;
+            color: var(--color-warning); /* MODIFIED: Changed from 'white' for better visibility against the dark header */
+            cursor: pointer;
+            font-size: 1.2rem;
+            padding: 8px;
+            border-radius: 8px;
+            transition: background-color var(--transition-speed);
+            display: flex; align-items: center; justify-content: center;
+        }
+        .nav-item-mobile.active {
+            background-color: rgba(255, 255, 255, 0.2); /* Highlight active link */
+        }
 
-        /* --- MAIN CONTENT (Desktop View) --- */
-        .main-content { margin-top: 50px; margin-left: 60px; padding: 20px; max-width: 1000px; margin-right: auto; margin-left: auto; background-color: var(--color-background); min-height: calc(100vh - 50px); }
+        /* --- NEW: Dropdown Styles for Mobile Header --- */
+        .account-menu-container {
+            position: relative; /* Container for the button and dropdown */
+        }
 
-        .product-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
+        .account-dropdown {
+            position: absolute;
+            top: 45px; /* Position below the button */
+            right: 0; /* Align right side of dropdown with button right side */
+            min-width: 200px;
+            background-color: var(--color-bg-card); /* Use translucent card background */
+            border-radius: var(--border-radius);
+            box-shadow: var(--box-shadow-glass);
+            z-index: 1050; /* Above header elements but below popups */
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }
 
-        /* Glass Effect for Product Card */
+        /* NEW: Market Dropdown Positioning */
+        .market-dropdown {
+             left: 0; /* Align left side with button left side */
+             right: unset;
+        }
+
+
+        .dropdown-item {
+            background: none;
+            border: none;
+            text-align: left;
+            padding: 10px 15px;
+            margin: 5px 0;
+            cursor: pointer;
+            font-size: 0.95em;
+            font-weight: 500;
+            color: var(--color-text-light);
+            border-radius: 8px;
+            transition: background-color var(--transition-speed);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .dropdown-item:hover {
+            background-color: var(--color-light-gray);
+        }
+        .dropdown-item.active {
+            background-color: var(--color-primary);
+            color: white;
+        }
+
+
+        /* * MAIN CONTENT (Desktop View)
+         */
+        .main-content {
+            margin-top: 50px; /* Added 50px margin-top for the fixed header */
+            margin-left: 60px;
+            padding: 20px;
+            max-width: 1000px;
+            margin-right: auto;
+            margin-left: auto;
+            background-color: var(--color-background);
+            min-height: calc(100vh - 50px); /* Adjust min-height */
+        }
+
+        /* UPDATED GRID: use auto-fill instead of auto-fit to prevent huge single cards */
+        .product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 20px; }
+
+        /* Glass Effect for Product Card - UPDATED FOR FIXED SIZE */
         .product-card {
             background-color: var(--color-bg-card);
             border: 1px solid rgba(255, 255, 255, 0.3); /* Light border for glass effect */
@@ -1077,10 +1772,27 @@ function HomePage() {
             transition: transform var(--transition-speed), box-shadow var(--transition-speed);
             backdrop-filter: blur(10px);
             -webkit-backdrop-filter: blur(10px);
+
+            /* FIX: Fixed height and Flexbox for alignment */
+            height: 340px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
         }
         .product-card:hover { transform: translateY(-5px); box-shadow: 0 8px 20px rgba(0,0,0,0.15); }
         .product-card img { width: 100%; height: 140px; object-fit: cover; border-radius: calc(var(--border-radius) - 2px); margin-bottom: 10px; }
-        .product-name { font-weight: bold; margin: 0 0 5px 0; font-size: 1.1em; color: var(--color-text-light); }
+
+        /* FIX: Limit text lines for product name */
+        .product-name {
+            font-weight: bold; margin: 0 0 5px 0; font-size: 1.1em; color: var(--color-text-light);
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            height: 2.4em; /* Fixed height for name area */
+        }
+
         .product-price { color: var(--color-success); margin: 0 0 10px 0; font-weight: 600; }
         .product-moq-label { font-size: 0.8em; color: var(--color-secondary); font-weight: bold; }
 
@@ -1165,15 +1877,52 @@ function HomePage() {
             -webkit-backdrop-filter: blur(10px);
             border: 1px solid var(--color-primary); /* Keep the primary/warning border hint */
         }
-        form label { display: block; text-align: left; margin-top: 15px; margin-bottom: 5px; font-weight: bold; color: var(--color-secondary); }
-        form input[type="text"], form input[type="number"], form input[type="file"], form select {
+
+        /* NEW: Form Groups and Grid */
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            text-align: left;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--color-secondary);
+            font-size: 0.95rem;
+        }
+
+        /* NEW: Form Inputs Styles */
+        .form-control {
             width: 100%;
-            padding: 10px;
-            margin-bottom: 10px;
-            border: 1px solid #ccc;
+            padding: 12px;
+            border: 1px solid #ced4da;
             border-radius: var(--border-radius);
             box-sizing: border-box;
-            font-size: 1em;
+            font-size: 1rem;
+            transition: border-color 0.3s, box-shadow 0.3s;
+            background-color: rgba(255, 255, 255, 0.8);
+        }
+        .form-control:focus {
+            border-color: var(--color-primary);
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.25);
+        }
+
+        /* NEW: Grid Layout for Form */
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        /* NEW: Image Preview Container */
+        .image-preview-container {
+            margin-top: 15px;
+            padding: 10px;
+            border: 2px dashed #ccc;
+            border-radius: var(--border-radius);
+            text-align: center;
+            background-color: rgba(255,255,255,0.5);
         }
 
         /* Form Messages */
@@ -1301,12 +2050,150 @@ function HomePage() {
         .detail-actions { margin-top: 25px; }
         .btn-out-of-stock { width: 100%; padding: 12px; background-color: var(--color-danger); color: white; border: none; border-radius: var(--border-radius); font-weight: bold; opacity: 0.7; cursor: not-allowed; }
 
+        /* --- NEW: Order History/Revenue Styles (Improved UI) --- */
+        .revenue-card {
+            background-color: var(--color-success);
+            color: white;
+            padding: 20px;
+            border-radius: var(--border-radius);
+            box-shadow: 0 4px 10px rgba(40, 167, 69, 0.5);
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        .revenue-card h2 {
+            margin: 5px 0 0 0;
+            font-size: 2.5em;
+        }
+        .order-history-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        .order-card {
+            background-color: var(--color-bg-card);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: var(--border-radius);
+            box-shadow: var(--box-shadow-glass);
+            overflow: hidden;
+            transition: transform 0.2s;
+            backdrop-filter: blur(5px);
+        }
+        .order-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 15px rgba(0, 0, 0, 0.15);
+        }
+        .order-header {
+            padding: 12px 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: bold;
+            font-size: 1.1em;
+            color: white;
+        }
+        .order-role {
+            padding: 2px 8px;
+            border-radius: 6px;
+            font-size: 0.8em;
+        }
+        .order-buyer-header { background-color: var(--color-primary); }
+        .order-seller-header { background-color: var(--color-success); }
+
+        .order-body { padding: 15px; }
+        .order-body p { margin: 5px 0; font-size: 0.95em; }
+        .order-items-list { list-style-type: none; padding-left: 0; margin-top: 10px; }
+        .order-items-list li {
+            margin-bottom: 5px;
+            font-size: 0.9em;
+            display: flex;
+            justify-content: space-between;
+            padding-bottom: 3px;
+            border-bottom: 1px dotted var(--color-light-gray);
+        }
+        .order-items-list li:last-child { border-bottom: none; }
+        .item-details { display: flex; gap: 15px; }
+        .item-quantity { color: var(--color-secondary); font-style: italic; }
+        .item-price { color: var(--color-text-dark); font-weight: bold; }
+
+        /* --- NEW: Checkout Page Styles --- */
+        .checkout-layout {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        .checkout-items-column {
+            flex: 2;
+            min-width: 300px;
+        }
+        .checkout-summary-column {
+            flex: 1;
+            min-width: 250px;
+        }
+        .checkout-item-card {
+            display: flex;
+            align-items: center;
+            background: var(--color-bg-card);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: var(--border-radius);
+            padding: 15px;
+            margin-bottom: 15px;
+            box-shadow: var(--box-shadow-glass);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }
+        .checkout-item-img {
+            width: 80px;
+            height: 80px;
+            object-fit: cover;
+            border-radius: 8px;
+            margin-right: 15px;
+            border: 1px solid #eee;
+        }
+        .checkout-item-info {
+            flex-grow: 1;
+        }
+        .checkout-item-total {
+            font-weight: bold;
+            color: var(--color-success);
+            font-size: 1.1em;
+            white-space: nowrap;
+            margin-left: 10px;
+        }
+
+        .summary-card {
+            background: var(--color-bg-card);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: var(--border-radius);
+            padding: 20px;
+            box-shadow: var(--box-shadow-glass);
+            position: sticky;
+            top: 80px; /* Below header (Adjusted to 20px buffer since header is now gone) */
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }
+        .summary-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            font-size: 1rem;
+        }
+        .summary-total {
+            border-top: 2px solid var(--color-light-gray);
+            padding-top: 15px;
+            margin-top: 15px;
+            font-weight: bold;
+            font-size: 1.2rem;
+            color: var(--color-text-dark);
+        }
+
+
         /* ======================================= */
         /* --- MOBILE FRIENDLY MEDIA QUERIES --- */
         /* ======================================= */
         @media (max-width: 768px) {
             /* 1. Header Navigation */
             .header {
+                /* Display is flex by default now */
                 height: 50px;
                 padding: 5px 15px;
             }
@@ -1314,25 +2201,13 @@ function HomePage() {
 
             /* Display Mobile Nav Links */
             .nav-links-mobile {
-                display: flex;
-                gap: 5px;
-                padding-left: 5px;
+                display: flex; /* MODIFIED: Show mobile links on small screen */
             }
 
             /* Style Mobile Nav Items (Icon buttons) */
             .nav-item-mobile {
-                background: none;
-                border: none;
-                color: white;
-                cursor: pointer;
                 font-size: 1.2rem;
                 padding: 8px;
-                border-radius: 8px;
-                transition: background-color var(--transition-speed);
-                display: flex; align-items: center; justify-content: center;
-            }
-            .nav-item-mobile.active {
-                background-color: rgba(255, 255, 255, 0.2); /* Highlight active link */
             }
 
             /* Logout button in header */
@@ -1352,9 +2227,14 @@ function HomePage() {
                 color: var(--color-warning);
             }
 
+            /* Ensure dropdown fits within mobile viewport */
+            .account-dropdown {
+                min-width: 180px;
+            }
+
             /* 2. Main Content Adjustment */
             .main-content {
-                margin-top: 50px; /* Use full width */
+                margin-top: 50px; /* Added 50px margin-top back for the visible header */
                 margin-left: 0;
                 padding: 15px;
             }
@@ -1366,6 +2246,12 @@ function HomePage() {
             }
             .product-card img {
                  height: 120px;
+            }
+
+            /* NEW: Mobile adjustment for form grid */
+            .form-grid {
+                grid-template-columns: 1fr;
+                gap: 10px;
             }
 
             /* 4. Product Detail Popup */
@@ -1418,55 +2304,105 @@ function HomePage() {
                 text-align: center;
             }
 
+            /* 8. Order List */
+            .order-history-list { grid-template-columns: 1fr; }
+            .revenue-card { font-size: 0.9em; }
+            .revenue-card h2 { font-size: 2em; }
+
+             /* 9. Checkout Summary sticky behavior is less useful on mobile */
+            .checkout-summary-column .summary-card {
+                position: static;
+                top: auto;
+            }
+
         }
       `}</style>
 
 
-      {/* 2. Fixed Header */}
+      {/* 2. Fixed Header (UPDATED) */}
       <div className="header">
         <div className="header-left">
             <span style={{ fontWeight: 'bold', fontSize: '1.2rem' }}>Shopping Mart</span>
 
-            {/* Mobile Navigation Links */}
+            {/* Mobile Navigation Links (Hidden on Desktop, Visible on Mobile) */}
             <div className="nav-links-mobile">
                 {/* Catalog Icon (Visible only to Wholesaler/Retailer) */}
-                {isBuyer && (
+                {isSeller && (
                     <button
-                        className={`nav-item-mobile ${activeView === 'catalog' && !editingProduct && !showProductForm ? 'active' : ''}`}
-                        onClick={() => { setActiveView('catalog'); setShowProductForm(false); setEditingProduct(null); }}
+                        className={`nav-item-mobile ${activeView === 'catalog' && !editingProduct && !showProductForm && !showCheckout ? 'active' : ''}`}
+                        onClick={() => handleNavClick('catalog')}
                         title="My Catalog"
                     >
                         📦
                     </button>
                 )}
 
-                {/* Marketplace Icon (Primary Wholesaler Market) - Visible only to Wholesaler/Retailer */}
-                {currentUserType !== 'consumer' && (
-                    <button
-                        className={`nav-item-mobile ${activeView === 'marketplace' ? 'active' : ''}`}
-                        onClick={() => { setActiveView('marketplace'); setShowProductForm(false); setEditingProduct(null); }}
-                        title="Wholesaler Market"
-                    >
-                        🏢
-                    </button>
+                {/* NEW: Marketplace Button/Dropdown (Visible to Wholesaler, Retailer, Consumer) */}
+                {(currentUserType === 'wholesaler' || currentUserType === 'retailer' || currentUserType === 'consumer') && (
+                    <div className="account-menu-container"> {/* Reusing the container class for positioning */}
+                        <button
+                            className={`nav-item-mobile ${((activeView === 'marketplace' || activeView === 'retailer_marketplace') && !showCheckout) || showMarketDropdown ? 'active' : ''}`}
+                            onClick={() => {
+                                // Retailer: Toggle dropdown
+                                if (currentUserType === 'retailer') {
+                                    setShowMarketDropdown(prev => !prev);
+                                    setShowAccountDropdown(false); // Close other dropdown
+                                }
+                                // Wholesaler: Go straight to Wholesale Market
+                                else if (currentUserType === 'wholesaler') {
+                                    handleNavClick('marketplace');
+                                }
+                                // Consumer: Go straight to Retailer Market
+                                else if (currentUserType === 'consumer') {
+                                    handleNavClick('retailer_marketplace');
+                                }
+                            }}
+                            title="Marketplace"
+                        >
+                            🏪
+                        </button>
+
+                        {/* Marketplace Dropdown (Only for Retailers) */}
+                        {currentUserType === 'retailer' && showMarketDropdown && (
+                            <div className="market-dropdown account-dropdown"> {/* Reusing base styles */}
+                                <button
+                                    className={`dropdown-item ${activeView === 'marketplace' ? 'active' : ''}`}
+                                    onClick={() => handleNavClick('marketplace')}
+                                >
+                                    🏢 Wholesale Market
+                                </button>
+                                <button
+                                    className={`dropdown-item ${activeView === 'retailer_marketplace' ? 'active' : ''}`}
+                                    onClick={() => handleNavClick('retailer_marketplace')}
+                                >
+                                    🔄 Retail Market
+                                </button>
+                            </div>
+                        )}
+                    </div>
                 )}
 
-                {/* Retailer Marketplace Icon (Secondary Market) - Visible only to Retailers and Consumers */}
-                {(currentUserType === 'retailer' || currentUserType === 'consumer') && (
-                    <button
-                        className={`nav-item-mobile ${activeView === 'retailer_marketplace' ? 'active' : ''}`}
-                        onClick={() => { setActiveView('retailer_marketplace'); setShowProductForm(false); setEditingProduct(null); }}
-                        title="Retailer Resale Market"
-                    >
-                        🔄
-                    </button>
+
+                {/* NEW: ACCOUNT DROPDOWN BUTTON (Mobile Only) */}
+                {(canViewPurchaseHistory || isSeller) && (
+                    <div className="account-menu-container">
+                        <button
+                            className={`nav-item-mobile ${showAccountDropdown ? 'active' : ''}`}
+                            onClick={() => { setShowAccountDropdown(prev => !prev); setShowMarketDropdown(false); }}
+                            title="Account"
+                        >
+                            👤
+                        </button>
+                        {showAccountDropdown && renderAccountDropdown()}
+                    </div>
                 )}
+
             </div>
         </div>
 
         <div>
           {/* Cart Icon */}
-          <button className="icon-btn" onClick={() => setShowCartPopup(true)} title="View Cart">
+          <button className="icon-btn" onClick={() => { setShowCartPopup(true); setShowCheckout(false); setShowAccountDropdown(false); setShowMarketDropdown(false); }} title="View Cart">
             🛒
             {totalItems > 0 && <span className="cart-badge">{totalItems}</span>}
           </button>
@@ -1479,13 +2415,13 @@ function HomePage() {
         </div>
       </div>
 
-      {/* 3. Sidebar Navigation (Desktop only) */}
+      {/* 3. Sidebar Navigation (Desktop only) (MODIFIED POSITION) */}
       <div className="sidebar">
         {/* Catalog Icon (Visible only to Wholesaler/Retailer) */}
-        {isBuyer && (
+        {isSeller && (
           <div
-            className={`nav-item ${activeView === 'catalog' && !editingProduct && !showProductForm ? 'active' : ''}`}
-            onClick={() => { setActiveView('catalog'); setShowProductForm(false); setEditingProduct(null); }}
+            className={`nav-item ${activeView === 'catalog' && !editingProduct && !showProductForm && !showCheckout ? 'active' : ''}`}
+            onClick={() => handleNavClick('catalog')}
             title="My Catalog"
           >
             📦
@@ -1495,8 +2431,8 @@ function HomePage() {
         {/* Marketplace Icon (Primary Wholesaler Market) - Visible only to Wholesaler/Retailer */}
         {currentUserType !== 'consumer' && (
           <div
-            className={`nav-item ${activeView === 'marketplace' ? 'active' : ''}`}
-            onClick={() => { setActiveView('marketplace'); setShowProductForm(false); setEditingProduct(null); }}
+            className={`nav-item ${activeView === 'marketplace' && !showCheckout ? 'active' : ''}`}
+            onClick={() => handleNavClick('marketplace')}
             title="Wholesaler Market"
           >
             🏢
@@ -1506,20 +2442,35 @@ function HomePage() {
         {/* Retailer Marketplace Icon (Secondary Market) - Visible only to Retailers and Consumers */}
         {(currentUserType === 'retailer' || currentUserType === 'consumer') && (
           <div
-              className={`nav-item ${activeView === 'retailer_marketplace' ? 'active' : ''}`}
-              onClick={() => { setActiveView('retailer_marketplace'); setShowProductForm(false); setEditingProduct(null); }}
+              className={`nav-item ${activeView === 'retailer_marketplace' && !showCheckout ? 'active' : ''}`}
+              onClick={() => handleNavClick('retailer_marketplace')}
               title="Retailer Resale Market"
           >
               🔄
           </div>
         )}
 
-        {/* Logout (Moved to header on mobile, kept here for desktop consistency) */}
-        {/* <div className="nav-item logout-icon-container" onClick={handleLogout} title="Logout">
-          <span className="material-symbols-outlined">
-            power_settings_new
-          </span>
-        </div> */}
+        {/* Purchase History Icon (Visible to all logged-in users) */}
+        {canViewPurchaseHistory && (
+             <div
+                className={`nav-item ${activeView === 'purchase_history' && !showCheckout ? 'active' : ''}`}
+                onClick={() => handleNavClick('purchase_history')}
+                title="Purchase History"
+            >
+                🧾
+            </div>
+        )}
+
+        {/* Revenue Dashboard Icon (Visible to Sellers) */}
+        {isSeller && (
+             <div
+                className={`nav-item ${activeView === 'revenue_dashboard' && !showCheckout ? 'active' : ''}`}
+                onClick={() => handleNavClick('revenue_dashboard')}
+                title="Revenue Dashboard"
+            >
+                📊
+            </div>
+        )}
       </div>
 
       {/* 4. Main Content Area */}
@@ -1531,7 +2482,8 @@ function HomePage() {
       </div>
 
       {/* 5. Floating Action Button (FAB) for Add Product (Visible only to Wholesaler/Retailer) */}
-      {isBuyer && !editingProduct && !showProductForm && (
+      {/* FIX: Changed isBuyer to isSeller for the FAB (only sellers can add products) */}
+      {isSeller && !editingProduct && !showProductForm && !showCheckout && activeView === 'catalog' && (
         <button className="fab" onClick={handleAddProductClick} title="Add New Product">
           ➕
         </button>
@@ -1551,6 +2503,3 @@ function HomePage() {
 }
 
 export default HomePage;
-
-
-

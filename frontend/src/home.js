@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { getAuth, signOut } from 'firebase/auth';
 import { useNavigate } from 'react-router-dom';
-import { getDatabase, ref, get, set, onValue, remove, push, runTransaction } from 'firebase/database';
+import { getDatabase, ref, get, set, onValue, remove, push, runTransaction, update } from 'firebase/database';
 import { initializeApp } from "firebase/app";
 
 // --- START: Firebase Configuration (REPLACE WITH YOUR ACTUAL CONFIG) ---
@@ -34,6 +34,9 @@ function HomePage() {
 
   // --- NEW STATE for Product Details Popup ---
   const [selectedProduct, setSelectedProduct] = useState(null);
+
+  // --- NEW STATE for Order Status Popup (Buyer) ---
+  const [selectedOrderForStatus, setSelectedOrderForStatus] = useState(null);
 
   // --- NEW STATE for Search ---
   const [searchQuery, setSearchQuery] = useState('');
@@ -186,19 +189,30 @@ function HomePage() {
                 loadedBuyerOrders.push({ ...order, role: 'Buyer' });
             }
 
-            // 2. Check if the current user is a SELLER in any item (Revenue Dashboard)
+            // 2. Check if the current user is a SELLER in any item (Revenue Dashboard & Pending Orders)
             if (currentUserType === 'wholesaler' || currentUserType === 'retailer') {
                 const sellerItems = order.items.filter(item => item.wholesalerId === userId);
 
                 if (sellerItems.length > 0) {
                     const revenueForThisOrder = sellerItems.reduce((sum, item) => sum + item.subtotal, 0);
-                    calculatedRevenue += revenueForThisOrder; // Accumulate revenue
+
+                    // CRITICAL UPDATE: Get the specific status for THIS seller from the map
+                    // If legacy data or missing, default to 'Pending'
+                    const mySellerStatus = order.sellerStatuses && order.sellerStatuses[userId]
+                                         ? order.sellerStatuses[userId]
+                                         : 'Pending';
+
+                    // UPDATED LOGIC: Only add to revenue if status is 'Delivered'
+                    if (mySellerStatus === 'Delivered') {
+                        calculatedRevenue += revenueForThisOrder;
+                    }
 
                     // Create a seller-centric view of the order
                     loadedSellerOrders.push({
                         ...order,
                         items: sellerItems,
                         totalPrice: revenueForThisOrder, // The 'totalPrice' here is the revenue for this specific seller
+                        status: mySellerStatus, // OVERWRITE global status with specific seller status for the view
                         role: 'Seller',
                     });
                 }
@@ -283,6 +297,20 @@ function HomePage() {
       setShowMarketDropdown(false); // NEW: Close market dropdown
   };
   // --- END: General Navigation Handler ---
+
+  // --- STATUS UPDATE HANDLER (UPDATED FOR MULTI-SELLER) ---
+  const handleUpdateOrderStatus = async (orderId, newStatus) => {
+      try {
+          // We update specific path: orders/{orderId}/sellerStatuses/{currentUserId}
+          // This ensures we don't overwrite other sellers' statuses
+          const statusRef = ref(db, `orders/${orderId}/sellerStatuses/${userId}`);
+          await set(statusRef, newStatus);
+          setNotification(`✅ Order status updated to **${newStatus}**`);
+      } catch (error) {
+          console.error("Error updating status:", error);
+          setNotification("🚨 Failed to update order status.");
+      }
+  };
 
 
   // --- Cart Adjustment Logic (for Edit and Delete) (UNCHANGED) ---
@@ -371,13 +399,8 @@ function HomePage() {
   };
 
 
-  // --- ADD/EDIT/DELETE Logic ---
-
-  // FIX START: Modified handleStartEdit to prevent resetting state
+  // --- ADD/EDIT/DELETE Logic (UNCHANGED) ---
   const handleStartEdit = (product) => {
-    // We manually set the view to catalog instead of using handleNavClick,
-    // because handleNavClick resets editingProduct to null.
-    setActiveView('catalog');
     setShowProductForm(false);
     setEditingProduct(product);
 
@@ -390,8 +413,8 @@ function HomePage() {
 
     setProductPhoto(null);
     setAddProductError(''); setAddProductSuccess('');
+    handleNavClick('catalog'); // Use the unified handler
   };
-  // FIX END
 
   const handleUpdateProduct = async (e) => {
     e.preventDefault();
@@ -594,22 +617,7 @@ function HomePage() {
       updateCartItem(product, requestedQuantity);
   };
 
-  const handleManualQuantityChange = (product, event) => {
-    let value = event.target.value;
-
-    if (value === "") {
-        return;
-    }
-
-    let newQuantity = parseInt(value, 10);
-    if (isNaN(newQuantity) || newQuantity < 0) {
-        newQuantity = 0;
-    }
-
-    updateCartItem(product, newQuantity);
-  };
-
-  // --- Order Placement Logic (UNCHANGED) ---
+  // --- Order Placement Logic (UPDATED FOR MULTI-SELLER STATUS) ---
 
   // Utility function to get flattened, current cart items for display/checkout
   const getCartDisplayItems = () => {
@@ -673,12 +681,19 @@ function HomePage() {
 
     const totalOrderPrice = items.reduce((total, item) => total + item.subtotal, 0);
 
+    // NEW: Create Status Map for each seller involved
+    const sellerStatuses = {};
+    const uniqueSellers = [...new Set(items.map(item => item.wholesalerId))];
+    uniqueSellers.forEach(sellerId => {
+        sellerStatuses[sellerId] = 'Pending';
+    });
+
     const orderData = {
         buyerId: userId,
         buyerName: user.displayName || 'Unknown User',
         timestamp: new Date().toISOString(),
         totalPrice: totalOrderPrice,
-        status: 'Pending', // Initial status
+        sellerStatuses: sellerStatuses, // NEW: separate status for each seller
         items: items.map(item => ({
             productId: item.productId,
             wholesalerId: item.wholesalerId,
@@ -722,12 +737,9 @@ function HomePage() {
         const transactionResults = await Promise.all(stockDeductionPromises);
 
         // Check if any transaction failed (returned null/undefined result, which means abort)
-        // Note: The transaction object returned by runTransaction has a `committed` property
         const failedTransaction = transactionResults.find(result => !result || !result.committed);
 
         if (failedTransaction) {
-            // A transaction failed (e.g., stock was insufficient).
-            // Cannot easily roll back other successful deductions in RTDB.
             setNotification('🚨 Order failed! Stock changed for one or more items during checkout. Please review your cart and try again.');
             setShowCheckout(false);
             return;
@@ -758,28 +770,63 @@ function HomePage() {
   };
 
 
-  // --- Inline Component for Quantity Control (UNCHANGED) ---
+  // --- UPDATED: Inline Component for Quantity Control ---
   const CartQuantityControl = ({ product }) => {
     const sellerId = product.wholesalerId;
     const productId = product.id;
+    // Get the actual value from the DB/Cart state
     const currentQuantity = cartItems[sellerId]?.[productId]?.quantity || 0;
-    // const moq = product.minOrderQuantity || 1; // Unused here, kept for completeness
+
+    // Local state allows user to type any number without immediate validation
+    const [inputValue, setInputValue] = useState(currentQuantity);
+
+    // Effect: Sync local input with DB value when DB updates (e.g. from external change or post-validation correction)
+    useEffect(() => {
+        setInputValue(currentQuantity);
+    }, [currentQuantity]);
+
+    // Handle typing: Just update local state
+    const handleInput = (e) => {
+        setInputValue(e.target.value);
+    };
+
+    // Handle Submission: Check validation and update DB
+    const submitChange = () => {
+        let newValue = parseInt(inputValue, 10);
+        if (isNaN(newValue) || newValue < 0) newValue = 0;
+
+        // Only update if value actually changed to prevent loop
+        if (newValue !== currentQuantity) {
+             // Validation (MOQ, Stock) happens inside updateCartItem
+             // If invalid, it clamps the value, updates DB, and the useEffect above will
+             // reset the input box to the valid clamped number.
+             updateCartItem(product, newValue);
+        }
+    };
+
+    // Handle Enter Key
+    const handleKeyDown = (e) => {
+        if (e.key === 'Enter') {
+            submitChange();
+            e.target.blur(); // Remove focus
+        }
+    };
 
     return (
       <div className="quantity-control-container">
         <button
           onClick={() => handleUpdateCartQuantity(product, -1)}
           className="quantity-btn decrement"
-          // Disable decrement if current quantity is 0
           disabled={currentQuantity === 0}
         >
           -
         </button>
         <input
             type="number"
-            value={currentQuantity}
-            onChange={(e) => handleManualQuantityChange(product, e)}
-            onBlur={(e) => handleManualQuantityChange(product, e)}
+            value={inputValue}
+            onChange={handleInput}
+            onBlur={submitChange} // Validate on click away
+            onKeyDown={handleKeyDown} // Validate on Enter
             min="0"
             className="quantity-input"
         />
@@ -846,7 +893,6 @@ function HomePage() {
                 src={product.photoBase64}
                 alt={product.name}
                 className="detail-photo-simple"
-                // No onClick handler here to avoid Base64 new tab issue
               />
             </div>
 
@@ -880,6 +926,81 @@ function HomePage() {
         </div>
       </div>
     );
+  };
+
+  // --- Status Timeline Popup (Buyer - UPDATED FOR MULTIPLE SELLERS) ---
+  const renderStatusPopup = () => {
+      if (!selectedOrderForStatus) return null;
+
+      const steps = ['Pending', 'Confirmed', 'Dispatched', 'Delivered'];
+      const order = selectedOrderForStatus;
+
+      // Group items by Wholesaler ID
+      const itemsBySeller = {};
+      order.items.forEach(item => {
+          if (!itemsBySeller[item.wholesalerId]) {
+              itemsBySeller[item.wholesalerId] = {
+                  name: item.wholesalerName,
+                  items: []
+              };
+          }
+          itemsBySeller[item.wholesalerId].items.push(item);
+      });
+
+      return (
+          <div className="product-detail-overlay" onClick={(e) => {
+              if (e.target.classList.contains('product-detail-overlay')) {
+                  setSelectedOrderForStatus(null);
+              }
+          }}>
+              <div className="product-detail-content" style={{ maxWidth: '600px', maxHeight: '80vh', overflowY: 'auto' }}>
+                  <button className="close-btn" onClick={() => setSelectedOrderForStatus(null)}>✖</button>
+                  <h3 className="section-header">Order Status 📦</h3>
+                  <p style={{marginBottom: '20px'}}><strong>Order ID:</strong> {order.id.substring(0,10)}...</p>
+
+                  {/* ITERATE THROUGH EACH SELLER IN THE ORDER */}
+                  {Object.entries(itemsBySeller).map(([sellerId, data], idx) => {
+                      // Get status from the map. Fallback to 'Pending' if not found.
+                      const status = order.sellerStatuses && order.sellerStatuses[sellerId]
+                                   ? order.sellerStatuses[sellerId]
+                                   : 'Pending';
+
+                      const currentStepIndex = steps.indexOf(status);
+
+                      return (
+                        <div key={sellerId} style={{ marginBottom: '30px', borderBottom: idx < Object.keys(itemsBySeller).length - 1 ? '1px dashed #ccc' : 'none', paddingBottom: '20px' }}>
+                            <h4 style={{color: 'var(--color-primary)', margin: '0 0 10px 0'}}>
+                                Seller: {data.name}
+                            </h4>
+
+                            {/* Timeline for this seller */}
+                            <div className="status-timeline" style={{marginBottom: '15px'}}>
+                                {steps.map((step, index) => (
+                                    <div key={step} className={`timeline-step ${index <= currentStepIndex ? 'active' : ''}`}>
+                                        <div className="timeline-icon">
+                                            {index <= currentStepIndex ? '✔️' : '⚪'}
+                                        </div>
+                                        <div className="timeline-label">{step}</div>
+                                        {index < steps.length - 1 && <div className={`timeline-line ${index < currentStepIndex ? 'active' : ''}`}></div>}
+                                    </div>
+                                ))}
+                            </div>
+
+                            {/* Items from this seller */}
+                            <div style={{backgroundColor: '#f9f9f9', padding: '10px', borderRadius: '8px'}}>
+                                <p style={{fontSize: '0.9em', fontWeight: 'bold', marginBottom: '5px'}}>Items included:</p>
+                                <ul style={{margin: 0, paddingLeft: '20px', fontSize: '0.9em', color: '#555'}}>
+                                    {data.items.map((item, itemIdx) => (
+                                        <li key={itemIdx}>{item.productName} (x{item.quantity})</li>
+                                    ))}
+                                </ul>
+                            </div>
+                        </div>
+                      );
+                  })}
+              </div>
+          </div>
+      );
   };
 
 
@@ -1357,53 +1478,168 @@ function HomePage() {
         );
     }
 
+    // SPLIT LOGIC: Separate Active from Past orders
+    // Note: With multi-seller status, "Active" means ANY seller has not yet delivered.
+    // For simplicity, if ALL sellers delivered, it's past. Otherwise active.
+
+    const activeOrders = [];
+    const pastOrders = [];
+
+    buyerOrders.forEach(order => {
+        const statuses = Object.values(order.sellerStatuses || {});
+        // If statuses is empty (legacy), check order.status (legacy). If that's missing, assume active.
+        if (statuses.length === 0) {
+            activeOrders.push(order);
+        } else {
+            // If ALL statuses are 'Delivered', it's past.
+            const allDelivered = statuses.every(s => s === 'Delivered');
+            if (allDelivered) pastOrders.push(order);
+            else activeOrders.push(order);
+        }
+    });
+
+
+    const renderOrderList = (orders) => (
+        <div className="order-history-list">
+            {orders.map((order) => (
+                <div key={order.id} className="order-card">
+                    <div className="order-header order-buyer-header" style={pastOrders.includes(order) ? {filter: 'grayscale(0.5)', backgroundColor: '#555'} : {}}>
+                        <span className="order-role" style={{ backgroundColor: 'rgba(255, 255, 255, 0.2)' }}>
+                            {pastOrders.includes(order) ? 'COMPLETED' : 'IN PROGRESS'}
+                        </span>
+                        <span className="order-date">
+                            {new Date(order.timestamp).toLocaleDateString()}
+                        </span>
+                    </div>
+                    <div className="order-body">
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div>
+                                <p><strong>Order ID:</strong> {order.id.substring(0, 10)}...</p>
+                                <p>
+                                    <strong>Total Cost:</strong>
+                                    <span style={{ color: 'var(--color-primary)', fontWeight: 'bold', marginLeft: '5px' }}>
+                                        ₹ {order.totalPrice.toFixed(2)}
+                                    </span>
+                                </p>
+                            </div>
+                            <button
+                                className="btn-info"
+                                style={{ fontSize: '0.8em', padding: '5px 10px' }}
+                                onClick={() => setSelectedOrderForStatus(order)}
+                            >
+                                View Status
+                            </button>
+                        </div>
+
+                        <h5 style={{ marginTop: '10px', borderBottom: '1px solid var(--color-light-gray)', paddingBottom: '5px', color: 'var(--color-primary)' }}>Items Purchased:</h5>
+                        <ul className="order-items-list">
+                            {order.items.slice(0, 3).map((item, index) => (
+                                <li key={item.productId + index}>
+                                    <span>{item.productName}</span>
+                                    <div className="item-details">
+                                        <span className="item-quantity">x{item.quantity}</span>
+                                    </div>
+                                </li>
+                            ))}
+                            {order.items.length > 3 && <li style={{fontStyle: 'italic', color: '#888'}}>... and {order.items.length - 3} more</li>}
+                        </ul>
+                    </div>
+                </div>
+            ))}
+        </div>
+    );
+
     return (
         <div style={{ marginTop: '20px' }}>
             <h3 className="section-header" style={{ color: 'var(--color-primary)' }}>
-                Purchase History ({buyerOrders.length})
+                Purchase History 🧾
             </h3>
-            <div className="order-history-list">
-                {buyerOrders.map((order) => (
-                    <div key={order.id} className="order-card">
-                        <div className="order-header order-buyer-header">
-                            <span className="order-role" style={{ backgroundColor: 'rgba(255, 255, 255, 0.2)' }}>
-                                PURCHASE
-                            </span>
-                            <span className="order-date">
-                                {new Date(order.timestamp).toLocaleDateString()}
-                            </span>
-                        </div>
-                        <div className="order-body">
-                            <p><strong>Order ID:</strong> {order.id.substring(0, 10)}...</p>
-                            <p>
-                                <strong>Total Cost:</strong>
-                                <span style={{ color: 'var(--color-primary)', fontWeight: 'bold', marginLeft: '5px' }}>
-                                    ₹ {order.totalPrice.toFixed(2)}
-                                </span>
-                            </p>
-                            <p><strong>Items Count:</strong> {order.items.length}</p>
 
-                            <h5 style={{ marginTop: '10px', borderBottom: '1px solid var(--color-light-gray)', paddingBottom: '5px', color: 'var(--color-primary)' }}>Items Purchased:</h5>
-                            <ul className="order-items-list">
-                                {order.items.map((item, index) => (
-                                    <li key={item.productId + index}>
-                                        <span>{item.productName}</span>
-                                        <div className="item-details">
-                                            <span className="item-quantity">x{item.quantity}</span>
-                                            <span className="item-price">
-                                                ₹ {(item.price * item.quantity).toFixed(2)}
-                                            </span>
-                                        </div>
-                                    </li>
-                                ))}
-                            </ul>
-                        </div>
-                    </div>
-                ))}
-            </div>
+            {/* ACTIVE ORDERS SECTION */}
+            <h4 className="history-section-title">🚚 Active / In Progress ({activeOrders.length})</h4>
+            {activeOrders.length > 0 ? renderOrderList(activeOrders) : <p style={{color: '#666', fontStyle:'italic'}}>No active orders.</p>}
+
+            {/* DIVIDER */}
+            <hr style={{ margin: '40px 0', borderTop: '2px dashed #ddd' }} />
+
+            {/* PAST ORDERS SECTION */}
+            <h4 className="history-section-title">✅ Past / Delivered Orders ({pastOrders.length})</h4>
+            {pastOrders.length > 0 ? renderOrderList(pastOrders) : <p style={{color: '#666', fontStyle:'italic'}}>No past orders.</p>}
+
         </div>
     );
   };
+
+  // --- NEW: Pending Orders Page (Seller Side) ---
+  const renderPendingOrdersPage = () => {
+      const isSeller = currentUserType === 'wholesaler' || currentUserType === 'retailer';
+      if (!isSeller) return null;
+
+      // FILTER LOGIC: Only show orders where THIS seller's status is NOT Delivered
+      // The status property in sellerOrders was already filtered/set in useEffect
+      const pendingOrders = sellerOrders.filter(o => o.status !== 'Delivered');
+
+      return (
+          <div style={{ marginTop: '20px' }}>
+              <h3 className="section-header" style={{ color: 'var(--color-warning)' }}>
+                  Order Management 🚚
+              </h3>
+
+              {pendingOrders.length === 0 ? (
+                  <p>No pending orders to fulfill! (Completed orders can be found in the Revenue Dashboard)</p>
+              ) : (
+                  <div className="order-history-list">
+                      {pendingOrders.map((order) => (
+                          <div key={order.id} className="order-card">
+                              <div className="order-header" style={{ backgroundColor: 'var(--color-warning)', color: '#333' }}>
+                                  <span>Order #{order.id.substring(0, 8)}</span>
+                                  <span className="order-date">
+                                      {new Date(order.timestamp).toLocaleDateString()}
+                                  </span>
+                              </div>
+                              <div className="order-body">
+                                  <div className="status-control">
+                                      <label style={{ fontWeight: 'bold', display: 'block', marginBottom: '5px' }}>Current Status:</label>
+                                      <select
+                                        value={order.status} // Uses specific seller status
+                                        onChange={(e) => handleUpdateOrderStatus(order.id, e.target.value)}
+                                        className={`status-select status-${order.status.toLowerCase()}`}
+                                      >
+                                          <option value="Pending">🟡 Pending</option>
+                                          <option value="Confirmed">🔵 Confirmed</option>
+                                          <option value="Dispatched">🟠 Dispatched</option>
+                                          <option value="Delivered">🟢 Delivered (Mark Complete)</option>
+                                      </select>
+                                  </div>
+
+                                  <p><strong>Buyer:</strong> {order.buyerName}</p>
+                                  <p>
+                                      <strong>Your Revenue:</strong>
+                                      <span style={{ color: 'var(--color-success)', fontWeight: 'bold', marginLeft: '5px' }}>
+                                          ₹ {order.totalPrice.toFixed(2)}
+                                      </span>
+                                  </p>
+
+                                  <h5 style={{ marginTop: '10px', borderBottom: '1px solid var(--color-light-gray)', paddingBottom: '5px' }}>Items to Ship:</h5>
+                                  <ul className="order-items-list">
+                                      {order.items.map((item, index) => (
+                                          <li key={item.productId + index}>
+                                              <span>{item.productName}</span>
+                                              <div className="item-details">
+                                                  <span className="item-quantity">Qty: {item.quantity}</span>
+                                              </div>
+                                          </li>
+                                      ))}
+                                  </ul>
+                              </div>
+                          </div>
+                      ))}
+                  </div>
+              )}
+          </div>
+      );
+  };
+
 
   // --- NEW: Revenue Dashboard Page Render (Seller's Orders and Total Revenue) ---
   const renderRevenueDashboard = () => {
@@ -1420,6 +1656,10 @@ function HomePage() {
         );
     }
 
+    // Filter to show completed orders in the history list
+    // The status property in sellerOrders was already filtered/set in useEffect to be THIS seller's status
+    const completedOrders = sellerOrders.filter(o => o.status === 'Delivered');
+
     return (
         <div style={{ marginTop: '20px' }}>
             <h3 className="section-header" style={{ color: 'var(--color-success)' }}>
@@ -1431,19 +1671,19 @@ function HomePage() {
                 <p style={{ margin: 0, fontSize: '1.2em', fontWeight: 'bold' }}>Total Lifetime Revenue</p>
                 <h2>₹ {totalRevenue.toFixed(2)}</h2>
                 <p style={{ margin: '5px 0 0 0', fontSize: '0.9em' }}>
-                    from {sellerOrders.length} {sellerOrders.length === 1 ? 'order' : 'orders'}
+                    (Calculated from completed 'Delivered' orders only)
                 </p>
             </div>
 
             <h3 className="section-header" style={{ color: 'var(--color-secondary)' }}>
-                Sales History
+                Completed Sales History ({completedOrders.length})
             </h3>
 
-            {sellerOrders.length === 0 ? (
-                <p>No products purchased from you yet.</p>
+            {completedOrders.length === 0 ? (
+                <p>No completed sales yet. Mark orders as 'Delivered' in Pending Orders to see them here.</p>
             ) : (
                 <div className="order-history-list">
-                    {sellerOrders.map((order) => (
+                    {completedOrders.map((order) => (
                         <div key={order.id} className="order-card">
                             <div className="order-header order-seller-header">
                                 <span className="order-role" style={{ backgroundColor: 'rgba(255, 255, 255, 0.2)' }}>
@@ -1505,12 +1745,20 @@ function HomePage() {
                 </button>
             )}
             {showRevenue && (
-                <button
-                    className={`dropdown-item ${activeView === 'revenue_dashboard' ? 'active' : ''}`}
-                    onClick={() => handleNavClick('revenue_dashboard')}
-                >
-                    📊 Revenue Dashboard
-                </button>
+                <>
+                    <button
+                        className={`dropdown-item ${activeView === 'pending_orders' ? 'active' : ''}`}
+                        onClick={() => handleNavClick('pending_orders')}
+                    >
+                        🚚 Pending Orders
+                    </button>
+                    <button
+                        className={`dropdown-item ${activeView === 'revenue_dashboard' ? 'active' : ''}`}
+                        onClick={() => handleNavClick('revenue_dashboard')}
+                    >
+                        📊 Revenue Dashboard
+                    </button>
+                </>
             )}
         </div>
     );
@@ -1537,6 +1785,8 @@ function HomePage() {
     content = renderProductForm(false);
   } else if (activeView === 'purchase_history') {
     content = renderPurchaseHistoryPage();
+  } else if (activeView === 'pending_orders') {
+    content = renderPendingOrdersPage();
   } else if (activeView === 'revenue_dashboard') {
     content = renderRevenueDashboard();
   } else if (activeView === 'catalog' && isSeller) {
@@ -2055,6 +2305,47 @@ function HomePage() {
         .detail-actions { margin-top: 25px; }
         .btn-out-of-stock { width: 100%; padding: 12px; background-color: var(--color-danger); color: white; border: none; border-radius: var(--border-radius); font-weight: bold; opacity: 0.7; cursor: not-allowed; }
 
+        /* --- NEW: Timeline Styles --- */
+        .status-timeline { display: flex; justify-content: space-between; margin-top: 10px; position: relative; }
+        .timeline-step { display: flex; flex-direction: column; align-items: center; position: relative; flex: 1; }
+        .timeline-icon { width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; z-index: 2; background: white; border-radius: 50%; }
+        .timeline-label { font-size: 0.8em; margin-top: 5px; color: var(--color-secondary); font-weight: bold; }
+        .timeline-line { position: absolute; top: 15px; left: 50%; width: 100%; height: 2px; background-color: #ddd; z-index: 1; }
+        .timeline-step.active .timeline-label { color: var(--color-success); }
+        .timeline-line.active { background-color: var(--color-success); }
+
+        /* --- NEW: Order Status Dropdown Styles --- */
+        .status-control {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: rgba(255, 255, 255, 0.4);
+            border-radius: 8px;
+        }
+        .status-select {
+            padding: 8px;
+            border-radius: 5px;
+            font-weight: bold;
+            width: 100%;
+            border: 1px solid #ccc;
+        }
+        .status-pending { background-color: #fff3cd; color: #856404; }
+        .status-confirmed { background-color: #cce5ff; color: #004085; }
+        .status-dispatched { background-color: #ffeeba; color: #856404; }
+        .status-delivered { background-color: #d4edda; color: #155724; }
+
+        /* --- NEW: History Section Styles --- */
+        .history-section-title {
+            color: var(--color-secondary);
+            font-weight: bold;
+            margin: 15px 0 10px 0;
+            padding-left: 5px;
+            border-left: 4px solid var(--color-primary);
+            padding: 5px 10px;
+            background: rgba(255,255,255,0.5);
+            border-radius: 0 var(--border-radius) var(--border-radius) 0;
+        }
+
+
         /* --- NEW: Order History/Revenue Styles (Improved UI) --- */
         .revenue-card {
             background-color: var(--color-success);
@@ -2466,6 +2757,17 @@ function HomePage() {
             </div>
         )}
 
+        {/* NEW: Pending Orders (Visible to Sellers) */}
+        {isSeller && (
+             <div
+                className={`nav-item ${activeView === 'pending_orders' && !showCheckout ? 'active' : ''}`}
+                onClick={() => handleNavClick('pending_orders')}
+                title="Pending Orders"
+            >
+                🚚
+            </div>
+        )}
+
         {/* Revenue Dashboard Icon (Visible to Sellers) */}
         {isSeller && (
              <div
@@ -2500,7 +2802,10 @@ function HomePage() {
       {/* 7. Product Detail Popup Render */}
       {selectedProduct && renderProductDetailPopup()}
 
-      {/* 8. Notification Popup Render */}
+      {/* 8. Status Popup Render (Buyer) */}
+      {selectedOrderForStatus && renderStatusPopup()}
+
+      {/* 9. Notification Popup Render */}
       <NotificationPopup />
 
     </div>

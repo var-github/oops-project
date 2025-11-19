@@ -399,11 +399,19 @@ function HomePage() {
   };
 
 
-  // --- ADD/EDIT/DELETE Logic (UNCHANGED) ---
+  // --- ADD/EDIT/DELETE Logic (UPDATED FIX) ---
   const handleStartEdit = (product) => {
+    // 1. Reset UI states that might block the form
     setShowProductForm(false);
-    setEditingProduct(product);
+    setShowCheckout(false);
+    setShowCartPopup(false);
 
+    // 2. Set the View manually
+    // DO NOT call handleNavClick here because it resets setEditingProduct to null
+    setActiveView('catalog');
+
+    // 3. Set the Product Data
+    setEditingProduct(product);
     setProductName(product.name);
     setProductPrice(product.price.toString());
     setProductQuantity(product.quantity.toString());
@@ -411,9 +419,10 @@ function HomePage() {
     // Initialize MOQ for editing
     setMinOrderQuantity(product.minOrderQuantity ? product.minOrderQuantity.toString() : '1');
 
+    // 4. Reset Form Status
     setProductPhoto(null);
-    setAddProductError(''); setAddProductSuccess('');
-    handleNavClick('catalog'); // Use the unified handler
+    setAddProductError('');
+    setAddProductSuccess('');
   };
 
   const handleUpdateProduct = async (e) => {

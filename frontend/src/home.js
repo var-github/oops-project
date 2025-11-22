@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { getAuth, signOut } from 'firebase/auth';
 import { useNavigate } from 'react-router-dom';
 import { getDatabase, ref, get, set, onValue, remove, push, runTransaction, update } from 'firebase/database';
@@ -20,6 +20,51 @@ const db = getDatabase(app);
 const auth = getAuth(app);
 // --- END: Firebase Configuration ---
 
+// --- HELPER: Haversine Formula to calculate distance ---
+function calculateDistance(lat1, lon1, lat2, lon2) {
+    if (!lat1 || !lon1 || !lat2 || !lon2) return null;
+
+    const R = 6371; // Radius of the earth in km
+    const dLat = deg2rad(lat2 - lat1);
+    const dLon = deg2rad(lon2 - lon1);
+    const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    const d = R * c; // Distance in km
+    return d;
+}
+
+function deg2rad(deg) {
+    return deg * (Math.PI / 180);
+}
+
+// --- HELPER: Load Google Maps Script ---
+const loadGoogleMapsScript = (callback) => {
+    const existingScript = document.getElementById('googleMapsScript');
+    if (existingScript) {
+        if (window.google && window.google.maps && window.google.maps.places) {
+            callback();
+        } else {
+            existingScript.addEventListener('load', callback);
+        }
+        return;
+    }
+
+    const script = document.createElement('script');
+    script.id = 'googleMapsScript';
+    // libraries=places IS REQUIRED for search suggestions
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${process.env.REACT_APP_GOOGLE_MAPS_API_KEY}&libraries=places`;
+    script.async = true;
+    script.defer = true;
+    script.onload = () => {
+        if (callback) callback();
+    };
+    document.body.appendChild(script);
+};
+
+
 function HomePage() {
   const navigate = useNavigate();
   const user = auth.currentUser;
@@ -32,6 +77,23 @@ function HomePage() {
   const [showProductForm, setShowProductForm] = useState(false);
   const [showCartPopup, setShowCartPopup] = useState(false);
   const [showCheckout, setShowCheckout] = useState(false);
+
+  // --- NEW STATE for Location ---
+  const [userLocation, setUserLocation] = useState(null);
+  const [locationStatus, setLocationStatus] = useState('Acquiring location...');
+  const [manualAddress, setManualAddress] = useState('');
+  const [showLocationPopup, setShowLocationPopup] = useState(false);
+  const [mapsLoaded, setMapsLoaded] = useState(false);
+
+  // --- Refs for Maps ---
+  const addressInputRef = useRef(null);
+  const mapContainerRef = useRef(null);
+  const mapInstanceRef = useRef(null);
+  const markerInstanceRef = useRef(null);
+
+  // FIX: Create a ref to hold the latest userLocation.
+  // This ensures the useEffect always sees the most recent location when opening the popup.
+  const latestLocationRef = useRef(userLocation);
 
   // --- NEW STATE for Product Details Popup ---
   const [selectedProduct, setSelectedProduct] = useState(null);
@@ -79,6 +141,160 @@ function HomePage() {
   // --- NEW STATE for Marketplace Dropdown (Mobile Only, Retailer) ---
   const [showMarketDropdown, setShowMarketDropdown] = useState(false);
 
+  // --- FIX: Inject CSS for Google Places Autocomplete Z-Index ---
+  useEffect(() => {
+      const style = document.createElement('style');
+      style.innerHTML = `
+        .pac-container {
+            z-index: 10000 !important; /* Fix: Ensure suggestions appear above the popup */
+            font-family: Arial, sans-serif;
+        }
+      `;
+      document.head.appendChild(style);
+      return () => {
+          if (document.head.contains(style)) {
+              document.head.removeChild(style);
+          }
+      };
+  }, []);
+
+  // --- FIX: Sync the Ref with State ---
+  useEffect(() => {
+      latestLocationRef.current = userLocation;
+  }, [userLocation]);
+
+  // --- Load Google Maps & Get Initial Geolocation ---
+  useEffect(() => {
+      // 1. Load Google Maps API
+      loadGoogleMapsScript(() => {
+          setMapsLoaded(true);
+      });
+
+      // 2. Get Browser Location
+      if (navigator.geolocation) {
+          navigator.geolocation.getCurrentPosition(
+              (position) => {
+                  setUserLocation({
+                      lat: position.coords.latitude,
+                      lng: position.coords.longitude
+                  });
+                  setLocationStatus('Current GPS Location');
+              },
+              (error) => {
+                  console.log("Location access denied or unavailable:", error);
+                  setLocationStatus('Location permission denied or unavailable');
+              }
+          );
+      } else {
+          setLocationStatus('Geolocation not supported by this browser');
+      }
+  }, []);
+
+  // --- FIX: Always Re-Initialize Map when Popup Opens ---
+  useEffect(() => {
+      if (showLocationPopup && mapsLoaded) {
+
+          // A. Initialize Map (FORCE NEW INSTANCE every time popup opens)
+          if (mapContainerRef.current) {
+               // FIX: Use the Ref to get the absolute latest location, not the stale closure variable
+               const center = latestLocationRef.current || { lat: 20.5937, lng: 78.9629 };
+
+               const map = new window.google.maps.Map(mapContainerRef.current, {
+                   center: center,
+                   zoom: latestLocationRef.current ? 15 : 5, // Zoom in if we have a location
+                   mapTypeControl: false,
+                   streetViewControl: false,
+                   fullscreenControl: false
+               });
+               mapInstanceRef.current = map;
+
+               const marker = new window.google.maps.Marker({
+                   position: center,
+                   map: map,
+                   draggable: true,
+                   title: "Delivery Location",
+                   animation: window.google.maps.Animation.DROP
+               });
+               markerInstanceRef.current = marker;
+
+               // Helper: Update location when map is clicked or marker dragged
+               const updateFromMap = (latLng) => {
+                   const lat = latLng.lat();
+                   const lng = latLng.lng();
+                   setUserLocation({ lat, lng });
+
+                   // Reverse Geocode to get address text
+                   const geocoder = new window.google.maps.Geocoder();
+                   geocoder.geocode({ location: { lat, lng } }, (results, status) => {
+                       if (status === "OK" && results[0]) {
+                           const address = results[0].formatted_address;
+                           setManualAddress(address);
+                           setLocationStatus(address);
+                           if (addressInputRef.current) {
+                               addressInputRef.current.value = address;
+                           }
+                       } else {
+                           setManualAddress(`${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+                           setLocationStatus("Custom Map Location");
+                       }
+                   });
+               };
+
+               // Event: Drag End
+               marker.addListener("dragend", () => {
+                   updateFromMap(marker.getPosition());
+               });
+
+               // Event: Map Click
+               map.addListener("click", (e) => {
+                   marker.setPosition(e.latLng);
+                   updateFromMap(e.latLng);
+               });
+          }
+
+          // B. Initialize Autocomplete (Bind to the new map instance)
+          if (addressInputRef.current && mapInstanceRef.current) {
+              // CRITICAL: Pre-fill the input with the current address so user sees what is selected
+              if (manualAddress) {
+                  addressInputRef.current.value = manualAddress;
+              }
+
+              const autocomplete = new window.google.maps.places.Autocomplete(addressInputRef.current, {
+                  types: ['geocode'], // Limit to addresses
+                  fields: ['geometry', 'formatted_address']
+              });
+
+              // Bind autocomplete to map bounds for better local results
+              autocomplete.bindTo('bounds', mapInstanceRef.current);
+
+              autocomplete.addListener('place_changed', () => {
+                  const place = autocomplete.getPlace();
+                  if (!place.geometry || !place.geometry.location) {
+                      setNotification('⚠️ No details available for input: ' + place.name);
+                      return;
+                  }
+
+                  const lat = place.geometry.location.lat();
+                  const lng = place.geometry.location.lng();
+
+                  // Update State
+                  setUserLocation({ lat, lng });
+                  setManualAddress(place.formatted_address);
+                  setLocationStatus(place.formatted_address);
+
+                  // Update Map
+                  if (mapInstanceRef.current && markerInstanceRef.current) {
+                      const newPos = { lat, lng };
+                      mapInstanceRef.current.setCenter(newPos);
+                      mapInstanceRef.current.setZoom(16);
+                      markerInstanceRef.current.setPosition(newPos);
+                  }
+
+                  setNotification('✅ Location updated!');
+              });
+          }
+      }
+  }, [showLocationPopup, mapsLoaded]); // Intentionally excluding userLocation to prevent re-init loops
 
   // --- Data Fetching Logic (UPDATED FOR SEPARATE ORDERS/REVENUE) ---
   useEffect(() => {
@@ -126,14 +342,22 @@ function HomePage() {
       let usersData = {};
 
       if (productData) {
-          // Fetch all user types once to efficiently categorize products
+          // Fetch all user types once to efficiently categorize products and get Store Locations
           const usersSnapshot = await get(ref(db, 'users'));
           usersData = usersSnapshot.val() || {};
 
           for (let key in productData) {
-              const product = { id: key, ...productData[key] };
-              const sellerId = product.wholesalerId;
-              const sellerType = usersData[sellerId]?.userType; // Get the type of the seller
+              const sellerId = productData[key].wholesalerId;
+              const sellerData = usersData[sellerId];
+              const sellerType = sellerData?.userType;
+              const storeLocation = sellerData?.storeLocation; // Fetch store location {lat, lng, address}
+
+              // Merge store location into the product object
+              const product = {
+                  id: key,
+                  ...productData[key],
+                  storeLocation: storeLocation
+              };
 
               if (sellerId === userId) {
                   // Product listed by current user
@@ -203,7 +427,6 @@ function HomePage() {
                     const revenueForThisOrder = sellerItems.reduce((sum, item) => sum + item.subtotal, 0);
 
                     // CRITICAL UPDATE: Get the specific status for THIS seller from the map
-                    // If legacy data or missing, default to 'Pending'
                     const mySellerStatus = order.sellerStatuses && order.sellerStatuses[userId]
                                          ? order.sellerStatuses[userId]
                                          : 'Pending';
@@ -788,6 +1011,88 @@ function HomePage() {
       return stars;
   };
 
+  // --- NEW: Location Change Popup with MAP ---
+  const renderLocationPopup = () => {
+      if (!showLocationPopup) return null;
+
+      const handleResetLocation = () => {
+          if (navigator.geolocation) {
+              setLocationStatus('Acquiring location...');
+              navigator.geolocation.getCurrentPosition(
+                  (position) => {
+                      const lat = position.coords.latitude;
+                      const lng = position.coords.longitude;
+                      setUserLocation({ lat, lng });
+                      setLocationStatus('Current GPS Location');
+                      setManualAddress('');
+
+                      // Update map
+                      if (mapInstanceRef.current && markerInstanceRef.current) {
+                          const newPos = { lat, lng };
+                          mapInstanceRef.current.setCenter(newPos);
+                          mapInstanceRef.current.setZoom(15);
+                          markerInstanceRef.current.setPosition(newPos);
+                      }
+
+                      setNotification("✅ Reset to GPS location.");
+                  },
+                  (error) => {
+                      console.error(error);
+                      setNotification("🚨 Error getting GPS location.");
+                  }
+              );
+          }
+      };
+
+      return (
+          <div className="product-detail-overlay" onClick={(e) => {
+              if (e.target.classList.contains('product-detail-overlay')) setShowLocationPopup(false);
+          }}>
+              <div className="form-container" style={{backgroundColor: 'white', maxWidth: '500px', width: '90%'}}>
+                  <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom: '15px'}}>
+                      <h3 style={{color: 'var(--color-primary)', margin: 0}}>📍 Select Delivery Location</h3>
+                      <button onClick={() => setShowLocationPopup(false)} style={{background:'none', border:'none', fontSize:'1.5rem', cursor:'pointer', color:'#666'}}>✖</button>
+                  </div>
+
+                  <div className="form-group">
+                      <input
+                          ref={addressInputRef}
+                          type="text"
+                          className="form-control"
+                          placeholder={mapsLoaded ? "Search for area, street name..." : "Loading Maps..."}
+                          disabled={!mapsLoaded}
+                      />
+                  </div>
+
+                  {/* MAP CONTAINER */}
+                  <div
+                      ref={mapContainerRef}
+                      style={{
+                          width: '100%',
+                          height: '300px',
+                          borderRadius: '8px',
+                          marginTop: '15px',
+                          marginBottom: '15px',
+                          border: '1px solid #ccc'
+                      }}
+                  ></div>
+                  <p style={{fontSize: '0.8em', color:'#666', textAlign:'center', marginTop: '-10px', marginBottom: '15px'}}>
+                      * Drag marker or click map to refine location
+                  </p>
+
+                  <div style={{display:'flex', gap: '10px'}}>
+                      <button onClick={handleResetLocation} className="btn-secondary" style={{flex: 1}}>
+                          📡 Use Current Location
+                      </button>
+                      <button onClick={() => setShowLocationPopup(false)} className="btn-primary" style={{flex: 1}}>
+                          Confirm Location
+                      </button>
+                  </div>
+              </div>
+          </div>
+      );
+  };
+
   // --- UPDATED: Product Detail Popup (With Reviews) ---
   const renderProductDetailPopup = () => {
     if (!selectedProduct) return null;
@@ -803,6 +1108,13 @@ function HomePage() {
     const avgRating = product.averageRating || 0;
     const reviewCount = product.reviewCount || 0;
 
+    // Calculate Distance in popup
+    let distanceStr = null;
+    if (userLocation && product.storeLocation && product.storeLocation.lat && product.storeLocation.lng) {
+        const d = calculateDistance(userLocation.lat, userLocation.lng, product.storeLocation.lat, product.storeLocation.lng);
+        distanceStr = d ? `${d.toFixed(1)} km away` : null;
+    }
+
     return (
       <div className="product-detail-overlay" onClick={(e) => {
         if (e.target.classList.contains('product-detail-overlay')) setSelectedProduct(null);
@@ -813,6 +1125,7 @@ function HomePage() {
           <div className="detail-header">
             <h3>{product.name}</h3>
             <p className="seller-name">Seller: {product.wholesalerName}</p>
+             {distanceStr && <p style={{color: '#007bff', fontWeight: '500', margin: '5px 0'}}>📍 {distanceStr}</p>}
             <div style={{marginTop: '5px'}}>
                 {renderStars(Math.round(avgRating))}
                 <span style={{color:'#666', marginLeft:'5px', fontSize:'0.9em'}}>
@@ -1062,6 +1375,18 @@ function HomePage() {
     return (
       <div style={{ marginTop: '20px' }}>
         <h3 className="section-header" style={{ color: 'var(--color-primary)' }}>Wholesale Marketplace ({wholesalerProducts.length})</h3>
+
+        {/* DISPLAY CURRENT LOCATION HEADER */}
+        <div
+            onClick={() => setShowLocationPopup(true)}
+            style={{marginBottom: '15px', color: '#666', fontSize: '0.9em', borderLeft: '4px solid var(--color-primary)', paddingLeft: '10px', backgroundColor: 'rgba(255,255,255,0.5)', padding: '5px', cursor: 'pointer', transition: 'background-color 0.2s'}}
+            onMouseEnter={(e) => e.target.style.backgroundColor = 'rgba(255,255,255,0.8)'}
+            onMouseLeave={(e) => e.target.style.backgroundColor = 'rgba(255,255,255,0.5)'}
+        >
+            📍 Delivery Location: <strong>{manualAddress || locationStatus}</strong> {userLocation && `(${userLocation.lat.toFixed(4)}, ${userLocation.lng.toFixed(4)})`}
+            <span style={{float:'right', color:'var(--color-primary)', fontWeight:'bold'}}>Change ✎</span>
+        </div>
+
         <div style={{ marginBottom: '20px' }}>
             <input type="text" placeholder="🔍 Search products..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} style={{ width: '100%', padding: '12px', borderRadius: 'var(--border-radius)', border: '1px solid #ccc', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.1)' }} />
         </div>
@@ -1072,13 +1397,29 @@ function HomePage() {
               const isOutOfStock = product.quantity <= 0;
               const isInCart = currentQuantity > 0;
               const moq = product.minOrderQuantity || 1;
+
+              // Calculate distance
+              let distanceStr = null;
+              if (userLocation && product.storeLocation && product.storeLocation.lat && product.storeLocation.lng) {
+                  const d = calculateDistance(userLocation.lat, userLocation.lng, product.storeLocation.lat, product.storeLocation.lng);
+                  distanceStr = d ? `${d.toFixed(1)} km` : null;
+              }
+
               return (
                 <div key={product.id} className="product-card" style={{ opacity: isOutOfStock ? 0.6 : 1, cursor: 'pointer' }} onClick={() => setSelectedProduct(product)}>
                   <div>
                     <img src={product.photoBase64} alt={product.name} />
                     <p className="product-name">{product.name}</p>
                     <p className="product-price">Price: ₹ {product.price.toFixed(2)}</p>
-                    <div style={{margin: '0 0 5px 0', color: '#777', fontSize: '0.85em'}}>
+
+                    {/* Distance Badge */}
+                    {distanceStr && (
+                        <div style={{display: 'inline-block', backgroundColor: '#e9f5ff', color: '#007bff', fontSize: '0.8em', padding: '3px 8px', borderRadius: '10px', marginBottom: '5px', fontWeight: 'bold'}}>
+                             📍 {distanceStr}
+                        </div>
+                    )}
+
+                    <div style={{margin: '5px 0', color: '#777', fontSize: '0.85em'}}>
                        {product.averageRating ? `★ ${product.averageRating.toFixed(1)} (${product.reviewCount})` : 'No ratings yet'}
                     </div>
                     <p className="product-moq-label">MOQ: {moq}</p>
@@ -1100,6 +1441,18 @@ function HomePage() {
     return (
       <div style={{ marginTop: '20px' }}>
         <h3 className="section-header" style={{ color: 'var(--color-info)' }}>Retailer Marketplace ({retailerProducts.length})</h3>
+
+        {/* DISPLAY CURRENT LOCATION HEADER */}
+        <div
+            onClick={() => setShowLocationPopup(true)}
+            style={{marginBottom: '15px', color: '#666', fontSize: '0.9em', borderLeft: '4px solid var(--color-info)', paddingLeft: '10px', backgroundColor: 'rgba(255,255,255,0.5)', padding: '5px', cursor: 'pointer', transition: 'background-color 0.2s'}}
+            onMouseEnter={(e) => e.target.style.backgroundColor = 'rgba(255,255,255,0.8)'}
+            onMouseLeave={(e) => e.target.style.backgroundColor = 'rgba(255,255,255,0.5)'}
+        >
+            📍 Delivery Location: <strong>{manualAddress || locationStatus}</strong> {userLocation && `(${userLocation.lat.toFixed(4)}, ${userLocation.lng.toFixed(4)})`}
+            <span style={{float:'right', color:'var(--color-info)', fontWeight:'bold'}}>Change ✎</span>
+        </div>
+
         <div style={{ marginBottom: '20px' }}>
             <input type="text" placeholder="🔍 Search products..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} style={{ width: '100%', padding: '12px', borderRadius: 'var(--border-radius)', border: '1px solid #ccc', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.1)' }} />
         </div>
@@ -1110,13 +1463,29 @@ function HomePage() {
               const isOutOfStock = product.quantity <= 0;
               const isInCart = currentQuantity > 0;
               const moq = product.minOrderQuantity || 1;
+
+              // Calculate distance
+              let distanceStr = null;
+              if (userLocation && product.storeLocation && product.storeLocation.lat && product.storeLocation.lng) {
+                  const d = calculateDistance(userLocation.lat, userLocation.lng, product.storeLocation.lat, product.storeLocation.lng);
+                  distanceStr = d ? `${d.toFixed(1)} km` : null;
+              }
+
               return (
                 <div key={product.id} className="product-card" style={{ opacity: isOutOfStock ? 0.6 : 1, cursor: 'pointer' }} onClick={() => setSelectedProduct(product)}>
                   <div>
                     <img src={product.photoBase64} alt={product.name} />
                     <p className="product-name">{product.name}</p>
                     <p className="product-price">Price: ₹ {product.price.toFixed(2)}</p>
-                    <div style={{margin: '0 0 5px 0', color: '#777', fontSize: '0.85em'}}>
+
+                     {/* Distance Badge */}
+                     {distanceStr && (
+                        <div style={{display: 'inline-block', backgroundColor: '#e9f5ff', color: '#007bff', fontSize: '0.8em', padding: '3px 8px', borderRadius: '10px', marginBottom: '5px', fontWeight: 'bold'}}>
+                             📍 {distanceStr}
+                        </div>
+                    )}
+
+                    <div style={{margin: '5px 0', color: '#777', fontSize: '0.85em'}}>
                        {product.averageRating ? `★ ${product.averageRating.toFixed(1)} (${product.reviewCount})` : 'No ratings yet'}
                     </div>
                     <p className="product-moq-label">MOQ: {moq} | Seller: {product.wholesalerName}</p>
@@ -1526,6 +1895,7 @@ function HomePage() {
 
       {isSeller && !editingProduct && !showProductForm && !showCheckout && activeView === 'catalog' && <button className="fab" onClick={handleAddProductClick} title="Add New Product">➕</button>}
       {showCartPopup && renderCartPopup()}
+      {showLocationPopup && renderLocationPopup()}
       {selectedProduct && renderProductDetailPopup()}
       {selectedOrderForStatus && renderStatusPopup()}
       {showReviewModal && renderReviewModal()}

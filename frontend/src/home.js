@@ -106,8 +106,11 @@ function HomePage() {
   const [targetReviewProduct, setTargetReviewProduct] = useState(null); // { productId, productName, orderId }
   const [reviewData, setReviewData] = useState({ rating: 0, comment: '' });
 
-  // --- NEW STATE for Search ---
+  // --- NEW STATE for Search & Sort ---
   const [searchQuery, setSearchQuery] = useState('');
+  const [sortOption, setSortOption] = useState('default'); // default, price_asc, price_desc, rating, distance
+  const [showSortDropdown, setShowSortDropdown] = useState(false);
+
 
   // --- Notification State ---
   const [notification, setNotification] = useState(null);
@@ -140,23 +143,6 @@ function HomePage() {
 
   // --- NEW STATE for Marketplace Dropdown (Mobile Only, Retailer) ---
   const [showMarketDropdown, setShowMarketDropdown] = useState(false);
-
-  // --- FIX: Inject CSS for Google Places Autocomplete Z-Index ---
-  useEffect(() => {
-      const style = document.createElement('style');
-      style.innerHTML = `
-        .pac-container {
-            z-index: 10000 !important; /* Fix: Ensure suggestions appear above the popup */
-            font-family: Arial, sans-serif;
-        }
-      `;
-      document.head.appendChild(style);
-      return () => {
-          if (document.head.contains(style)) {
-              document.head.removeChild(style);
-          }
-      };
-  }, []);
 
   // --- FIX: Sync the Ref with State ---
   useEffect(() => {
@@ -522,6 +508,7 @@ function HomePage() {
       setSearchQuery('');
       setShowAccountDropdown(false);
       setShowMarketDropdown(false);
+      setSortOption('default');
   };
 
   const handleUpdateOrderStatus = async (orderId, newStatus) => {
@@ -1011,6 +998,85 @@ function HomePage() {
       return stars;
   };
 
+  // --- NEW: Helper Function for Sorting Products ---
+  const applySort = (products) => {
+      const sorted = [...products];
+      switch (sortOption) {
+          case 'price_asc':
+              return sorted.sort((a, b) => a.price - b.price);
+          case 'price_desc':
+              return sorted.sort((a, b) => b.price - a.price);
+          case 'rating':
+              return sorted.sort((a, b) => (b.averageRating || 0) - (a.averageRating || 0));
+          case 'distance':
+              if (!userLocation) return sorted;
+              return sorted.sort((a, b) => {
+                  const distA = a.storeLocation && a.storeLocation.lat ? calculateDistance(userLocation.lat, userLocation.lng, a.storeLocation.lat, a.storeLocation.lng) : 99999;
+                  const distB = b.storeLocation && b.storeLocation.lat ? calculateDistance(userLocation.lat, userLocation.lng, b.storeLocation.lat, b.storeLocation.lng) : 99999;
+                  return (distA || 99999) - (distB || 99999);
+              });
+          default:
+              return sorted;
+      }
+  };
+
+  // --- NEW: Reusable Sort Dropdown Component ---
+  const renderSortMenu = () => (
+      <div style={{
+          position: 'absolute',
+          right: 0,
+          top: '110%',
+          backgroundColor: 'white',
+          border: '1px solid rgba(0,0,0,0.08)',
+          borderRadius: '12px',
+          boxShadow: '0 8px 30px rgba(0,0,0,0.12)',
+          zIndex: 1000,
+          minWidth: '200px',
+          overflow: 'hidden',
+          animation: 'fadeInSlide 0.2s ease-out',
+          padding: '8px 0'
+      }}>
+          <div style={{ padding: '8px 16px', fontSize: '0.75em', textTransform: 'uppercase', color: '#888', letterSpacing: '1px', fontWeight: 'bold' }}>
+              Sort By
+          </div>
+          {['default', 'price_asc', 'price_desc', 'rating', 'distance'].map(optionKey => {
+              const labels = {
+                  default: 'Recommended',
+                  price_asc: 'Price: Low to High',
+                  price_desc: 'Price: High to Low',
+                  rating: 'Rating: High to Low',
+                  distance: 'Distance: Nearest First'
+              };
+              const isActive = sortOption === optionKey;
+
+              return (
+                  <div
+                      key={optionKey}
+                      onClick={() => { setSortOption(optionKey); setShowSortDropdown(false); }}
+                      style={{
+                          padding: '10px 16px',
+                          cursor: 'pointer',
+                          backgroundColor: isActive ? 'var(--color-primary-light, #e6f7ff)' : 'transparent',
+                          color: isActive ? 'var(--color-primary, #007bff)' : '#333',
+                          fontWeight: isActive ? '600' : '400',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          fontSize: '0.95rem',
+                          transition: 'background 0.2s'
+                      }}
+                      onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.backgroundColor = '#f9f9f9'; }}
+                      onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.backgroundColor = 'transparent'; }}
+                  >
+                      {labels[optionKey]}
+                      {isActive && <span>✓</span>}
+                  </div>
+              );
+          })}
+      </div>
+  );
+
+
   // --- NEW: Location Change Popup with MAP ---
   const renderLocationPopup = () => {
       if (!showLocationPopup) return null;
@@ -1371,7 +1437,10 @@ function HomePage() {
   );
 
   const renderWholesalerMarketplace = () => {
-    const filteredProducts = wholesalerProducts.filter(product => product.name.toLowerCase().includes(searchQuery.toLowerCase()));
+    let filteredProducts = wholesalerProducts.filter(product => product.name.toLowerCase().includes(searchQuery.toLowerCase()));
+    // APPLY SORT
+    filteredProducts = applySort(filteredProducts);
+
     return (
       <div style={{ marginTop: '20px' }}>
         <h3 className="section-header" style={{ color: 'var(--color-primary)' }}>Wholesale Marketplace ({wholesalerProducts.length})</h3>
@@ -1387,9 +1456,27 @@ function HomePage() {
             <span style={{float:'right', color:'var(--color-primary)', fontWeight:'bold'}}>Change ✎</span>
         </div>
 
-        <div style={{ marginBottom: '20px' }}>
-            <input type="text" placeholder="🔍 Search products..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} style={{ width: '100%', padding: '12px', borderRadius: 'var(--border-radius)', border: '1px solid #ccc', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.1)' }} />
+        {/* SEARCH & SORT BAR */}
+        <div style={{ marginBottom: '20px', display: 'flex', gap: '10px', position: 'relative' }}>
+            <input
+                type="text"
+                placeholder="🔍 Search products..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                style={{ flex: 1, padding: '12px', borderRadius: 'var(--border-radius)', border: '1px solid #ccc', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.1)' }}
+            />
+            <div style={{position: 'relative'}}>
+                <button
+                    onClick={() => setShowSortDropdown(!showSortDropdown)}
+                    className="btn-secondary"
+                    style={{ height: '100%', padding: '0 15px', display: 'flex', alignItems: 'center', gap: '5px' }}
+                >
+                    ⇅ Sort
+                </button>
+                {showSortDropdown && renderSortMenu()}
+            </div>
         </div>
+
         {filteredProducts.length === 0 ? <p>{searchQuery ? 'No products match your search.' : 'No products currently listed.'}</p> : (
           <div className="product-grid">
             {filteredProducts.map((product) => {
@@ -1437,7 +1524,10 @@ function HomePage() {
   };
 
   const renderRetailerMarketplace = () => {
-    const filteredProducts = retailerProducts.filter(product => product.name.toLowerCase().includes(searchQuery.toLowerCase()));
+    let filteredProducts = retailerProducts.filter(product => product.name.toLowerCase().includes(searchQuery.toLowerCase()));
+    // APPLY SORT
+    filteredProducts = applySort(filteredProducts);
+
     return (
       <div style={{ marginTop: '20px' }}>
         <h3 className="section-header" style={{ color: 'var(--color-info)' }}>Retailer Marketplace ({retailerProducts.length})</h3>
@@ -1453,9 +1543,27 @@ function HomePage() {
             <span style={{float:'right', color:'var(--color-info)', fontWeight:'bold'}}>Change ✎</span>
         </div>
 
-        <div style={{ marginBottom: '20px' }}>
-            <input type="text" placeholder="🔍 Search products..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} style={{ width: '100%', padding: '12px', borderRadius: 'var(--border-radius)', border: '1px solid #ccc', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.1)' }} />
+        {/* SEARCH & SORT BAR */}
+        <div style={{ marginBottom: '20px', display: 'flex', gap: '10px', position: 'relative' }}>
+            <input
+                type="text"
+                placeholder="🔍 Search products..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                style={{ flex: 1, padding: '12px', borderRadius: 'var(--border-radius)', border: '1px solid #ccc', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.1)' }}
+            />
+            <div style={{position: 'relative'}}>
+                <button
+                    onClick={() => setShowSortDropdown(!showSortDropdown)}
+                    className="btn-secondary"
+                    style={{ height: '100%', padding: '0 15px', display: 'flex', alignItems: 'center', gap: '5px' }}
+                >
+                    ⇅ Sort
+                </button>
+                {showSortDropdown && renderSortMenu()}
+            </div>
         </div>
+
         {filteredProducts.length === 0 ? <p>{searchQuery ? 'No products match your search.' : 'No products currently listed.'}</p> : (
           <div className="product-grid">
             {filteredProducts.map((product) => {
@@ -1889,7 +1997,7 @@ function HomePage() {
 
       <div className="main-content">
         <h2 style={{ color: 'var(--color-text-light)' }}>Welcome, {user ? user.displayName : 'User'}!</h2>
-        <p style={{ color: 'var(--color-secondary)', marginBottom: '30px' }}>You are logged in as a **{currentUserType}**.</p>
+        <p style={{ color: 'var(--color-secondary)', marginBottom: '30px' }}>You are logged in as a {currentUserType}.</p>
         {content}
       </div>
 

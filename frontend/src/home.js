@@ -85,11 +85,6 @@ function HomePage() {
   const [showLocationPopup, setShowLocationPopup] = useState(false);
   const [mapsLoaded, setMapsLoaded] = useState(false);
 
-  // --- NEW STATE: Payment Processing ---
-  const [showPaymentModal, setShowPaymentModal] = useState(false);
-  const [paymentStep, setPaymentStep] = useState('qr'); // 'qr' or 'success'
-  const [paymentTimer, setPaymentTimer] = useState(10); // Countdown display
-
   // --- Refs for Maps ---
   const addressInputRef = useRef(null);
   const mapContainerRef = useRef(null);
@@ -870,7 +865,7 @@ function HomePage() {
     });
   };
 
-  // 1. Triggered by "Confirm Order" button
+  // 1. Triggered by "Confirm Order" button - NOW OPENS RAZRAZORPAY
   const startPaymentProcess = () => {
       const items = getCartDisplayItems();
       const invalidItems = items.filter(item => item.isDeleted || item.isOverstocked || item.isBelowMOQ);
@@ -887,32 +882,48 @@ function HomePage() {
           return;
       }
 
-      // If valid, open payment modal
-      setPaymentStep('qr');
-      setPaymentTimer(10);
-      setShowPaymentModal(true);
+      // Calculate total
+      const totalOrderPrice = items.reduce((total, item) => total + item.subtotal, 0);
+
+      // Open Razorpay Checkout
+      openRazorpayCheckout(totalOrderPrice);
   };
 
-  // 2. Timer Logic to simulate payment
-  useEffect(() => {
-      let timer;
-      if (showPaymentModal && paymentStep === 'qr') {
-          if (paymentTimer > 0) {
-              timer = setTimeout(() => setPaymentTimer(prev => prev - 1), 1000);
-          } else {
-              // Timer finished, show success animation
-              setPaymentStep('success');
-              // Wait 2.5 seconds for animation, then finalize order
-              setTimeout(() => {
-                  finalizeOrder();
-              }, 2500);
+  // 2. NEW: Open Razorpay Checkout
+  const openRazorpayCheckout = (amount) => {
+      const options = {
+          key: process.env.REACT_APP_RAZORPAY_KEY_ID,
+          amount: Math.round(amount * 100), // Razorpay expects amount in paise
+          currency: 'INR',
+          name: 'Shopping Mart',
+          description: 'Order Payment',
+          image: '', // Optional: Add your logo URL
+          handler: function (response) {
+              // Payment successful
+              finalizeOrder(response.razorpay_payment_id, response.razorpay_order_id, response.razorpay_signature);
+          },
+          prefill: {
+              name: user?.displayName || '',
+              email: user?.email || '',
+              contact: user?.phoneNumber || ''
+          },
+          theme: {
+              color: '#007bff'
+          },
+          modal: {
+              ondismiss: function() {
+                  setNotification('⚠️ Payment cancelled');
+                  setShowCheckout(true);
+              }
           }
-      }
-      return () => clearTimeout(timer);
-  }, [showPaymentModal, paymentStep, paymentTimer]);
+      };
 
-  // 3. The Actual Database Write (Originally handlePlaceOrder)
-  const finalizeOrder = async () => {
+      const razorpay = new window.Razorpay(options);
+      razorpay.open();
+  };
+
+  // 3. UPDATED: The Actual Database Write (now accepts payment IDs)
+  const finalizeOrder = async (razorpayPaymentId = null, razorpayOrderId = null, razorpaySignature = null) => {
       const items = getCartDisplayItems();
       // Calculate total again for security
       const totalOrderPrice = items.reduce((total, item) => total + item.subtotal, 0);
@@ -929,6 +940,11 @@ function HomePage() {
           timestamp: new Date().toISOString(),
           totalPrice: totalOrderPrice,
           sellerStatuses: sellerStatuses,
+          // NEW: Payment tracking
+          paymentStatus: razorpayPaymentId ? 'paid' : 'pending',
+          razorpay_payment_id: razorpayPaymentId || null,
+          razorpay_order_id: razorpayOrderId || null,
+          razorpay_signature: razorpaySignature || null,
           items: items.map(item => ({
               productId: item.productId,
               wholesalerId: item.wholesalerId,
@@ -961,7 +977,6 @@ function HomePage() {
 
           if (failedTransaction) {
               setNotification('🚨 Order failed! Stock changed during checkout.');
-              setShowPaymentModal(false); // Close modal
               setShowCheckout(false);
               return;
           }
@@ -972,15 +987,13 @@ function HomePage() {
           await remove(cartRef);
 
           setCartItems({});
-          setShowPaymentModal(false); // Close modal
           setShowCheckout(false);
-          setNotification(`🎉 Order placed successfully! Total: **₹ ${totalOrderPrice.toFixed(2)}**.`);
+          setNotification(`🎉 Order placed successfully! Total: **₹ ${totalOrderPrice.toFixed(2)}**. Payment ID: ${razorpayPaymentId}`);
           const defaultView = currentUserType === 'wholesaler' ? 'catalog' : 'marketplace';
           setActiveView(defaultView);
       } catch (error) {
           console.error('Error placing order:', error);
           setNotification('🚨 Failed to place order.');
-          setShowPaymentModal(false);
       }
   };
 
@@ -1684,95 +1697,6 @@ function HomePage() {
     );
   };
 
-  // --- NEW: Payment Modal Render ---
-  const renderPaymentModal = () => {
-      if (!showPaymentModal) return null;
-
-      const items = getCartDisplayItems();
-      const totalAmount = items.reduce((total, item) => total + item.subtotal, 0).toFixed(2);
-
-      // Generate a QR code URL (using a public API for demo purposes)
-      // In a real app, you would use a library or your backend
-      const qrData = `upi://pay?pa=${process.env.REACT_APP_MERCHANT_UPI_ID}&pn=ShoppingMart&am=${totalAmount}&cu=INR`;
-      const qrImage = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrData)}`;
-
-      return (
-          <div className="product-detail-overlay" style={{zIndex: 9999}}>
-              <div className="form-container" style={{backgroundColor: 'white', maxWidth: '400px', width: '90%', textAlign: 'center', padding: '30px'}}>
-
-                  {paymentStep === 'qr' ? (
-                      <>
-                          <h3 style={{color: 'var(--color-primary)', marginTop: 0}}>Scan to Pay</h3>
-                          <p style={{fontSize: '1.2rem', fontWeight: 'bold'}}>₹ {totalAmount}</p>
-
-                          <div style={{margin: '20px auto', border: '5px solid #f0f0f0', borderRadius: '10px', display: 'inline-block', padding: '10px'}}>
-                              <img src={qrImage} alt="UPI QR" style={{width: '200px', height: '200px'}} />
-                          </div>
-
-                          <p style={{color: '#666'}}>Completing payment in... <span style={{fontWeight:'bold', color: 'var(--color-primary)'}}>{paymentTimer}s</span></p>
-                          <div style={{width: '100%', backgroundColor: '#eee', height: '5px', borderRadius: '5px', marginTop: '10px'}}>
-                              <div style={{
-                                  width: `${(paymentTimer / 10) * 100}%`,
-                                  backgroundColor: 'var(--color-primary)',
-                                  height: '100%',
-                                  borderRadius: '5px',
-                                  transition: 'width 1s linear'
-                              }}></div>
-                          </div>
-
-                          <button
-                              onClick={() => { setShowPaymentModal(false); setNotification("⚠️ Payment Cancelled"); }}
-                              style={{marginTop: '20px', background: 'none', border: 'none', color: '#999', cursor: 'pointer', textDecoration: 'underline'}}>
-                              Cancel Payment
-                          </button>
-                      </>
-                  ) : (
-                      <div className="success-animation">
-                          <div className="checkmark-circle">
-                              <div className="checkmark draw"></div>
-                          </div>
-                          <h3 style={{color: 'var(--color-success)', marginTop: '20px'}}>Payment Successful!</h3>
-                          <p>Placing your order...</p>
-                      </div>
-                  )}
-              </div>
-
-              {/* Inline Styles for Animation */}
-              <style>{`
-                  .checkmark-circle {
-                      width: 80px; height: 80px; position: relative; display: inline-block;
-                      vertical-align: top; border-radius: 50%; border: 1px solid var(--color-success);
-                      animation: scale .3s ease-in-out 0s 1 forwards;
-                  }
-                  .checkmark-circle .checkmark {
-                      border-radius: 5px;
-                  }
-                  .checkmark-circle .checkmark.draw:after {
-                      animation-delay: 100ms;
-                      animation-duration: 1s;
-                      animation-timing-function: ease;
-                      animation-name: checkmark;
-                      transform: scaleX(-1) rotate(135deg);
-                      animation-fill-mode: forwards;
-                  }
-                  .checkmark-circle .checkmark:after {
-                      opacity: 1; height: 40px; width: 20px;
-                      transform-origin: left top;
-                      border-right: 7px solid var(--color-success);
-                      border-top: 7px solid var(--color-success);
-                      content: ''; left: 18px; top: 40px; position: absolute;
-                  }
-                  @keyframes checkmark {
-                      0% { height: 0; width: 0; opacity: 1; }
-                      20% { height: 0; width: 20px; opacity: 1; }
-                      40% { height: 40px; width: 20px; opacity: 1; }
-                      100% { height: 40px; width: 20px; opacity: 1; }
-                  }
-              `}</style>
-          </div>
-      );
-  };
-
   const renderCheckoutPage = () => {
     const cartDisplayItems = getCartDisplayItems();
     const totalOrderPrice = cartDisplayItems.reduce((total, item) => total + item.subtotal, 0);
@@ -2142,9 +2066,6 @@ function HomePage() {
       {selectedProduct && renderProductDetailPopup()}
       {selectedOrderForStatus && renderStatusPopup()}
       {showReviewModal && renderReviewModal()}
-
-      {/* RENDER PAYMENT MODAL */}
-      {renderPaymentModal()}
 
       <NotificationPopup />
     </div>
